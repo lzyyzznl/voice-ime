@@ -1,0 +1,27 @@
+{
+  "app_id": "YOUR_APP_ID",
+  "source": "YOUR_SOURCE",
+  "user_id": "YOUR_USER_ID",
+  "secret": "YOUR_SECRET",
+  "env": "prod",
+  "sample_rate": 16000,
+  "chunk_ms": 200,
+  "audio_device": "default",
+  "silence_timeout_sec": 15,
+  "silence_after_input_sec": 30,
+  "silence_rms_threshold": 300,
+  "osd": {
+    "width": 180,
+    "height": 38,
+    "y_ratio": 0.8
+  },
+  "focus_lost_stop": false,
+  "hold_ms": 300,
+  "llm": {
+    "endpoint": "https://api.deepseek.com/v1/chat/completions",
+    "api_key": "DEEPSEEK_API_KEY",
+    "model": "deepseek-v4-flash",
+    "system_prompt": "你是文本润色助手。删除文本中的口头语、感叹词和重复（如 嗯、啊、那个、就是），修正不通顺的用词和语病（例如口语中\"提交上代码\"应改为\"提交下代码\"），识别口语中的自我纠正（例如\"XX，不对，应该是 YY\"、\"不是 XX，是 YY\"、\"XX，说错了，YY\"），删除被纠正的错误内容，只保留纠正后的表达，保持原意，使表达通顺自然。将润色后的文本放在 <output> 与 </output> 标签内输出，标签外不要输出任何内容。",
+    "prompt": "原文："
+  }
+}

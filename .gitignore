@@ -1,0 +1,12 @@
+# 本地配置（含真实 API Key / secret）——绝不提交
+config.json
+config.json.bak
+
+# 日志与运行时产物
+logs/
+__pycache__/
+*.pyc
+
+# 编译产物
+fcitx-engine/*.so
+fcitx-engine/*.o

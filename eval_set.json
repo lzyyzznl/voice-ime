@@ -1,0 +1,117 @@
+[
+  {
+    "scenario": "口头语-前缀",
+    "input": "嗯那个需求我明白了",
+    "expected": "需求我明白了"
+  },
+  {
+    "scenario": "口头语-多个",
+    "input": "就是那个，我们就是说先看看情况再说",
+    "expected": "我们先看看情况再说"
+  },
+  {
+    "scenario": "感叹词",
+    "input": "哎呀这个功能真不错",
+    "expected": "这个功能真不错"
+  },
+  {
+    "scenario": "口头语-嗯嗯啊",
+    "input": "嗯嗯，啊对，就这样吧",
+    "expected": "对，就这样吧"
+  },
+  {
+    "scenario": "口头语-句中",
+    "input": "这个功能我觉得可以，就是说我们可以先试试",
+    "expected": "这个功能我觉得可以，我们可以先试试"
+  },
+  {
+    "scenario": "口头语-句尾",
+    "input": "嗯那就这样吧",
+    "expected": "那就这样吧"
+  },
+  {
+    "scenario": "语病-上下",
+    "input": "提交上代码",
+    "expected": "提交下代码"
+  },
+  {
+    "scenario": "语病-再在",
+    "input": "我在确认一下这个方案",
+    "expected": "我再确认一下这个方案"
+  },
+  {
+    "scenario": "语病-的地",
+    "input": "认真的做好这个任务",
+    "expected": "认真地做好这个任务"
+  },
+  {
+    "scenario": "语病-组合",
+    "input": "嗯你把这个代码提交上",
+    "expected": "你把这个代码提交下"
+  },
+  {
+    "scenario": "保持-专有名词",
+    "input": "把代码推到 gitlab 的 master 分支",
+    "expected": "把代码推到 gitlab 的 master 分支"
+  },
+  {
+    "scenario": "保持-数字版本",
+    "input": "版本号更新到 2.3.1",
+    "expected": "版本号更新到 2.3.1"
+  },
+  {
+    "scenario": "保持-正常句",
+    "input": "我们明天下午三点开会",
+    "expected": "我们明天下午三点开会"
+  },
+  {
+    "scenario": "停顿拼接-补标点",
+    "input": "需求我明白了明天下午对细节",
+    "expected": "需求我明白了，明天下午对细节"
+  },
+  {
+    "scenario": "停顿拼接-多句",
+    "input": "嗯好的那这个方案就这样我们明天再确认",
+    "expected": "那这个方案就这样，我们明天再确认"
+  },
+  {
+    "scenario": "边界-纯口头语",
+    "input": "嗯嗯嗯",
+    "expected": "嗯"
+  },
+  {
+    "scenario": "语病+保持混合",
+    "input": "提交上代码这个接口",
+    "expected": "提交下代码这个接口"
+  },
+  {
+    "scenario": "口头语-报告场景",
+    "input": "那个我们明天把报告发出去",
+    "expected": "我们明天把报告发出去"
+  },
+  {
+    "scenario": "自我纠正-不对",
+    "input": "Python窗口，不对，应该是草稿窗口，我觉得不要自动关闭了",
+    "expected": "草稿窗口我觉得不要自动关闭了"
+  },
+  {
+    "scenario": "自我纠正-不不不",
+    "input": "明天开会，不不不，后天开会吧",
+    "expected": "后天开会吧"
+  },
+  {
+    "scenario": "自我纠正-说错了",
+    "input": "用这个方案，说错了，用那个方案",
+    "expected": "用那个方案"
+  },
+  {
+    "scenario": "自我纠正-不是是",
+    "input": "不是提交到测试分支，是提交到 master 分支",
+    "expected": "提交到 master 分支"
+  },
+  {
+    "scenario": "自我纠正-哦对",
+    "input": "嗯我们把报告，哦对，把文档发出去",
+    "expected": "把文档发出去"
+  }
+]

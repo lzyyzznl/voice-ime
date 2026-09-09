@@ -15,12 +15,14 @@
 常驻；关闭/隐藏窗口 = 通知服务端退出草稿模式（恢复直接上屏）+ 清空内容，
 下次打开是全新的。
 
-config.json 的 llm 段（api_key 字段是环境变量名，密钥从该环境变量读取）：
+config.json 的 llm 段（api_key 填 sk- 开头的密钥，或填环境变量名从环境读取）：
   system_prompt = 角色 + 全部润色规则 + 标签输出约束（每次请求不变）
   prompt       = user 消息的前缀，默认 "原文："（后面接待润色文本）
+  auto_polish  = true 时核心服务在每句上屏前自动润色（本窗口不受影响）
   "llm": {
     "endpoint": "https://api.deepseek.com/v1/chat/completions",
-    "api_key": "DEEPSEEK_API_KEY",
+    "api_key": "sk-...",
+    "auto_polish": false,
     "model": "deepseek-v4-flash",
     "system_prompt": "你是文本润色助手。删除文本中的口头语、感叹词和重复（如 嗯、啊、那个、就是），修正不通顺的用词和语病，保持原意，使表达通顺自然。将润色后的文本放在 <output> 与 </output> 标签内输出，标签外不要输出任何内容。",
     "prompt": "原文："
@@ -28,15 +30,15 @@ config.json 的 llm 段（api_key 字段是环境变量名，密钥从该环境�
 """
 import json
 import os
-import re
 import socket
 import threading
 import time
-import urllib.request
 
 import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib   # noqa: E402
+
+import llm_polish   # noqa: E402  润色请求实现（与核心服务共用，含 SSL/Key 解析）
 
 UDP_ADDR = ("127.0.0.1", 19528)
 WIN_W, WIN_H = 560, 420
@@ -188,50 +190,22 @@ class Draft:
         if not text:
             self.buf_res.set_text("草稿为空，先说话或清空后重试。")
             return
-        prompt = cfg.get("prompt", "")
-        self.optimized = False
-        # api_key 字段存的是环境变量名（如 DEEPSEEK_API_KEY），取值时从环境读；
-        # 留空则默认用 DEEPSEEK_API_KEY
-        key_var = cfg.get("api_key", "").strip() or "DEEPSEEK_API_KEY"
-        api_key = os.environ.get(key_var, "").strip()
-        if not api_key:
-            self.buf_res.set_text("未找到 API Key：环境变量 %s 未设置，请在启动环境中 export 后重启服务。" % key_var)
+        if not llm_polish.resolve_key(cfg):
+            self.buf_res.set_text("未找到 API Key：在 config.json 的 llm.api_key 直接填 sk- 开头的密钥，"
+                                  "或填环境变量名并确保已 export（默认 DEEPSEEK_API_KEY）。")
             return
         model = cfg.get("model", "").strip()
-        system_prompt = cfg.get("system_prompt", "").strip()
         print("优化请求: endpoint=%s model=%s 文本长度=%d" % (endpoint, model, len(text)), flush=True)
         self.buf_res.set_text("优化中…")
+        self.optimized = False
         threading.Thread(target=self._optimize_worker,
-                         args=(endpoint, api_key, model, system_prompt, prompt, text),
-                         daemon=True).start()
+                         args=(cfg, text), daemon=True).start()
 
-    def _optimize_worker(self, endpoint, api_key, model, system_prompt, prompt, text):
+    def _optimize_worker(self, cfg, text):
         t0 = time.monotonic()
         try:
-            messages = [{"role": "user",
-                         "content": (prompt + "\n" + text) if prompt else text}]
-            if system_prompt:
-                messages.insert(0, {"role": "system", "content": system_prompt})
-            body = {
-                "model": model,
-                "messages": messages,
-                # v4 系列默认思考模式（high），润色任务不需要 → 显式关闭
-                "thinking": {"type": "disabled"},
-                "temperature": 0,   # 最低随机性：输出可预测、稳定
-            }
-            req = urllib.request.Request(
-                endpoint,
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"})
-            if api_key:
-                req.add_header("Authorization", "Bearer " + api_key)
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            raw = data["choices"][0]["message"]["content"].strip()
-            # 提取 <output> 标签内内容；模型未按标签输出时回退用整体（容忍偏离）
-            m = re.search(r"<output>(.*?)</output>", raw, re.S)
-            result = m.group(1).strip() if m else raw
-            print("优化完成: model=%s 耗时=%.2fs" % (model, time.monotonic() - t0), flush=True)
+            result = llm_polish.polish(cfg, text, timeout=120)
+            print("优化完成: model=%s 耗时=%.2fs" % (cfg.get("model"), time.monotonic() - t0), flush=True)
             print("  原文: %s" % text, flush=True)
             print("  结果: %s" % result, flush=True)
         except Exception as e:

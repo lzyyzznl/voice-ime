@@ -17,6 +17,7 @@ import ctypes
 import json
 import logging
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -28,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asr_client import StreamingASR
 from asr_doubao import DoubaoASR, URL_NOSTREAM
+import llm_polish
 
 SOCKET_PATH = "/tmp/voiceime-service.sock"
 LOG_PATH = str(Path(__file__).resolve().parent / "logs" / "voiceime-service.log")
@@ -354,6 +356,13 @@ class VoiceIMEService:
             self.generation = 0     # 会话代际：start 递增，旧 auto_stop 定时器据此失效
             self.drafting = False   # 录音中单按 Ctrl 切换：识别结果进草稿窗口（默认直接上屏）
             self.last_interim_text = ""  # 最新累积 interim 文本（停顿时兜底提交，防末句丢失）
+            # 自动润色：串行队列保证上屏顺序（润色慢于后续句到达时，绝不能乱序）
+            self.polish_q = queue.Queue()
+            self.polish_worker = None   # 每会话单 worker 线程，懒启动
+            self.polish_outstanding = 0 # 队列中未上屏的条数（积压降级判定）
+            self.polish_idle = threading.Event()
+            self.polish_idle.set()      # 队列清空时置位（stop 等它再发 done）
+            self.recent = []            # 已上屏句子的原文（润色上下文，最多 CONTEXT_N 句）
 
     def _make_asr(self, session):
         """按 config.asr_backend 构造 ASR 客户端（icenter/doubao），回调接口一致"""
@@ -390,6 +399,76 @@ class VoiceIMEService:
             session.send({"type": "preedit", "text": p["text"]})
             # 浮窗只显示声波：文本已上屏/在候选栏，不再重复显示（避免遮挡）
 
+    # ── 自动润色（llm.auto_polish）──
+    def _commit_text(self, session, text):
+        """提交最终文本；开启自动润色时先送 DeepSeek 润色再上屏。
+
+        顺序保证：文本一律经由会话的串行队列——即使某句跳过润色也排队，
+        否则原文会插到正在润色的前一句之前（commit 按到达顺序追加）。
+        积压（队列里已有未上屏句）时本句跳过润色，把延迟限制在单次润色内。
+        配置每次现读，改开关立即生效（无需重启 core）。
+        注意 done/preedit 仍由调用方同步发送：引擎收到 done 会复位 recording，
+        延迟发送会让新一轮录音的 started 被旧 done 覆盖。
+        """
+        cfg = llm_polish.load_cfg()
+        auto = bool(cfg.get("auto_polish")) and not session.drafting
+        with session.lock:
+            backlog = session.polish_outstanding > 0
+            polish = auto and not backlog
+            if auto and backlog:
+                log.info("润色积压，本句直接提交原文: %r", text)
+            session.polish_outstanding += 1
+            session.polish_idle.clear()
+            if session.polish_worker is None:
+                session.polish_worker = threading.Thread(
+                    target=self._polish_loop, args=(session,), daemon=True)
+                session.polish_worker.start()
+            session.polish_q.put((text, polish))
+
+    @staticmethod
+    def _split_sentences(text):
+        """按中文/英文句末标点切语义句；无标点（说话未停顿整段定稿）整体算一句"""
+        import re as _re
+        parts = _re.split(r"(?<=[。！？!?；;])", text)
+        sents = [p.strip() for p in parts if p.strip()]
+        return sents or ([text.strip()] if text.strip() else [])
+
+    def _send_commit(self, session, text, orig):
+        """上屏一条文本，并把原文按语义句记入润色上下文。
+
+        上下文按"句"裁剪（最多 CONTEXT_N 句），不是按 ASR 定稿条数：
+        用户连续说话时 VAD 800ms 才切一条 final（一条可含几十秒内容），
+        按条裁剪会让 recent 累积成"最近 1 分钟所有内容"。
+        """
+        session.send({"type": "commit", "text": text})
+        session.recent.extend(self._split_sentences(orig))
+        del session.recent[:-llm_polish.CONTEXT_N]
+
+    def _polish_loop(self, session):
+        """会话串行润色线程：逐条取队列 → 润色（若标记）→ 上屏。
+        失败/超时提交原文（不丢字）。随会话（引擎连接）存续，daemon。"""
+        while True:
+            text, polish = session.polish_q.get()
+            out = text
+            if polish:
+                try:
+                    cfg = llm_polish.load_cfg()
+                    if cfg.get("auto_polish"):
+                        # 上下文 = 最近 CONTEXT_N 个语义句（可能来自最近 1-2 条 final）
+                        ctx = list(session.recent[-llm_polish.CONTEXT_N:])
+                        t0 = time.time()
+                        out = llm_polish.polish(cfg, text, ctx)
+                        log.info("润色 %.2fs: %r -> %r", time.time() - t0, text, out)
+                except Exception as e:
+                    log.warning("润色失败，提交原文: %s", e)
+                    out = text
+            self._send_commit(session, out, orig=text)
+            with session.lock:
+                session.polish_outstanding -= 1
+                if session.polish_outstanding <= 0:
+                    session.polish_outstanding = 0
+                    session.polish_idle.set()
+
     def on_final(self, session, p):
         """iCenter 停顿分句：drafting 时追加进草稿；否则每句 final 立即提交，
         避免 preedit 被新句覆盖、内容丢失"""
@@ -403,7 +482,7 @@ class VoiceIMEService:
         if session.drafting:
             self._draft_send({"type": "text", "mode": "final", "text": text})
         else:
-            session.send({"type": "commit", "text": text})
+            self._commit_text(session, text)   # 自动润色开启时先润色再上屏
             session.send({"type": "preedit", "text": ""})   # 清空候选栏（录音状态由浮窗指示）
 
     def start_session(self, session, silent=False):
@@ -412,6 +491,8 @@ class VoiceIMEService:
                 return   # 已在录音（浮窗持续指示中）
             # 每次录音默认直接上屏：上一轮录音里切过的草稿模式不延续到本轮
             session.drafting = False
+            # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
+            session.recent = []
             # 长按触发即显示浮窗：浮窗出现 = 可开始说话
             # （服务端已收到 start 命令，引擎↔服务端连接就绪；ASR 握手期音频缓存补发）
             self._osd_send({"type": "show"})
@@ -525,7 +606,10 @@ class VoiceIMEService:
             if session.drafting:
                 self._draft_send({"type": "text", "mode": "final", "text": rem})
             else:
-                session.send({"type": "commit", "text": rem})
+                self._commit_text(session, rem)   # 自动润色开启时先润色再上屏
+                # 等上屏再发 done：紧随其后要发 started（续录），顺序颠倒会让
+                # 引擎先置 recording=true 再被旧 done 复位
+                session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
             session.send({"type": "done", "ok": True})
         else:
             session.send({"type": "done", "ok": bool("".join(finals).strip())})
@@ -616,7 +700,10 @@ class VoiceIMEService:
                 # 草稿模式：剩余文本进草稿（不上屏）
                 self._draft_send({"type": "text", "mode": "final", "text": rem_text})
             else:
-                session.send({"type": "commit", "text": rem_text})
+                self._commit_text(session, rem_text)   # 自动润色开启时先润色再上屏
+                # 等润色上屏后再发 done：done 会让引擎复位 recording，若先发，
+                # 用户立刻开始下一轮录音时旧句会落到新窗口
+                session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
             session.send({"type": "preedit", "text": ""})
             session.send({"type": "done", "ok": True})
         elif text:

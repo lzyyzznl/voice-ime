@@ -54,6 +54,17 @@ def save_cfg(cfg):
     tmp.replace(CONFIG)
 
 
+def deep_merge(dst, src):
+    """递归合并：只提交部分字段时保留未提交的键。
+    否则旧页面（未含新字段）保存会把新配置项整段抹掉。"""
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            deep_merge(dst[k], v)
+        else:
+            dst[k] = v
+    return dst
+
+
 def sanitize(patch):
     """按白名单过滤并类型检查用户提交的顶层键。返回 (clean, errors)。"""
     clean, errors = {}, []
@@ -78,6 +89,8 @@ def sanitize(patch):
                 clean[k] = {kk: vv for kk, vv in v.items()
                             if kk in ("endpoint", "api_key", "model", "system_prompt", "prompt")
                             and isinstance(vv, str)}
+                if isinstance(v.get("auto_polish"), bool):
+                    clean[k]["auto_polish"] = v["auto_polish"]
             else:  # osd
                 clean[k] = {kk: vv for kk, vv in v.items()
                             if kk in ("width", "height", "y_ratio") and isinstance(vv, (int, float))}
@@ -335,13 +348,14 @@ select option{background:var(--paper)}
   </section>
 
   <section class="card">
-    <div class="card-h"><h2>LLM 润色</h2><span class="hint">草稿窗「优化」按钮</span></div>
-    <p class="card-desc">服务端直连该 LLM 对转写文本做润色；API Key 字段填环境变量名。</p>
+    <div class="card-h"><h2>LLM 润色</h2><span class="hint">草稿窗「优化」+ 自动润色</span></div>
+    <p class="card-desc">服务端直连该 LLM 对转写文本做润色；API Key 填 sk- 开头的密钥，或填环境变量名（从环境读取）。</p>
     <div class="llm-grid">
       <div class="f"><label for="llm_endpoint">Endpoint</label><input type="text" id="llm_endpoint" spellcheck="false"></div>
       <div class="f"><label for="llm_model">模型</label><input type="text" id="llm_model" spellcheck="false"></div>
-      <div class="f"><label for="llm_api_key">API Key（环境变量名）</label><input type="text" id="llm_api_key" spellcheck="false"></div>
+      <div class="f"><label for="llm_api_key">API Key</label><input type="text" id="llm_api_key" spellcheck="false"></div>
     </div>
+    <label class="sw" style="margin-top:14px"><input type="checkbox" id="llm_auto_polish"><span class="tr"></span><span class="n">自动润色</span><span class="d">每句上屏前先润色</span></label>
     <div class="f" style="margin-top:14px"><label for="llm_system_prompt">System Prompt</label>
       <textarea id="llm_system_prompt" spellcheck="false"></textarea></div>
   </section>
@@ -407,6 +421,7 @@ const FIELD = [
   ["llm_endpoint", "llm.endpoint", "s"],
   ["llm_api_key",  "llm.api_key", "s"],
   ["llm_model",    "llm.model", "s"],
+  ["llm_auto_polish", "llm.auto_polish", "b"],
   ["llm_system_prompt", "llm.system_prompt", "s"],
 ];
 const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
@@ -605,7 +620,7 @@ class Handler(BaseHTTPRequestHandler):
                         self._send(400, json.dumps({"error": "; ".join(errors)}))
                         return
                     cfg = load_cfg()
-                    cfg.update(clean)
+                    deep_merge(cfg, clean)
                     save_cfg(cfg)
                     msg = "config.json 已更新"
                 if body.get("restart"):

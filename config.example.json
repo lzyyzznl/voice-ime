@@ -4,6 +4,23 @@
   "user_id": "YOUR_USER_ID",
   "secret": "YOUR_SECRET",
   "env": "prod",
+  "asr_backend": "doubao",
+  "doubao": {
+    "api_key": "YOUR_DOUBAO_API_KEY",
+    "resource_id": "volc.seedasr.sauc.duration",
+    "url": "nostream",
+    "request": {
+      "enable_punc": true,
+      "enable_itn": true,
+      "enable_ddc": true,
+      "enable_accelerate_text": false,
+      "enable_nonstream": true,
+      "show_utterances": true,
+      "end_window_size": 500,
+      "force_to_speech_time": 1000,
+      "accelerate_score": 1
+    }
+  },
   "sample_rate": 16000,
   "chunk_ms": 200,
   "audio_device": "default",

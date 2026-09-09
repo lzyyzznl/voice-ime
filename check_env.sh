@@ -56,10 +56,28 @@ pkg-config --exists glib-2.0 2>/dev/null && ok "glib2-devel" \
 
 echo ""
 echo "== 4. 运行时 =="
-if command -v python3 >/dev/null 2>&1; then
-    ok "python3 $(python3 --version 2>&1 | awk '{print $2}')"
+PY311=""
+for c in "$HOME/.local/bin/python3" python3; do
+    if command -v "$c" >/dev/null 2>&1; then PY311="$c"; break; fi
+done
+if [ -n "$PY311" ]; then
+    ok "core/web 运行时: $PY311 $($PY311 --version 2>&1 | awk '{print $2}')"
+    if "$PY311" -c "import websockets" >/dev/null 2>&1; then
+        ok "websockets 库已装 ($($PY311 -c 'import websockets; print(websockets.__version__)' 2>/dev/null))"
+    else
+        bad "websockets 库缺失（$PY311 -m pip install websockets）"
+    fi
 else
-    bad "python3 缺失（install.sh 会自动安装）"
+    bad "python3 缺失（core/web 需要 Python 3.10+）"
+fi
+if [ -x /usr/bin/python3.6 ]; then
+    ok "OSD/draft 运行时: python3.6"
+    /usr/bin/python3.6 -c "import gi" >/dev/null 2>&1 && ok "python3-gobject (gi)" \
+        || bad "python3-gobject 缺失（浮窗/草稿窗无法启动）"
+    /usr/bin/python3.6 -c "import cairo" >/dev/null 2>&1 && ok "python36-cairo" \
+        || bad "python36-cairo 缺失（浮窗绘制需要）"
+else
+    bad "python3.6 缺失（OSD 浮窗/草稿窗需要）"
 fi
 for c in parec paplay; do
     command -v "$c" >/dev/null 2>&1 && ok "$c" \
@@ -83,11 +101,36 @@ echo ""
 echo "== 6. 配置 =="
 if [ -f config.json ]; then
     ok "config.json 存在"
-    if ! python3 -c "import json; json.load(open('config.json'))" 2>/dev/null; then
-        bad "config.json 格式无效（JSON 解析失败）"
+    if "$PY311" -c "import json,sys; json.load(open('config.json'))" 2>/dev/null; then
+        ok "config.json JSON 合法"
+        DBKEY=$("$PY311" -c "import json; print((json.load(open('config.json')).get('doubao') or {}).get('api_key',''))" 2>/dev/null)
+        if [ -n "$DBKEY" ] && [ "$DBKEY" != "YOUR_DOUBAO_API_KEY" ]; then
+            ok "doubao.api_key 已配置"
+        else
+            bad "doubao.api_key 未配置（ASR 无法工作）"
+        fi
+        LLMACT=$("$PY311" -c "import json; print((json.load(open('config.json')).get('llm') or {}).get('active',''))" 2>/dev/null)
+        [ -n "$LLMACT" ] && ok "llm.active=$LLMACT" || info "llm 未配置（润色关闭，草稿窗优化不可用）"
+    else
+        bad "config.json JSON 解析失败"
     fi
 else
-    info "config.json 缺失（运行 ./install.sh 生成模板后填写 ASR 凭证）"
+    info "config.json 缺失（运行 ./install.sh 生成模板后填写豆包凭证）"
+fi
+
+echo ""
+echo "== 7. systemd 用户服务 =="
+if systemctl --user list-unit-files 2>/dev/null | grep -q voiceime-core; then
+    for u in core osd draft web; do
+        st=$(systemctl --user is-active voiceime-$u 2>/dev/null)
+        if [ "$st" = "active" ]; then
+            ok "voiceime-$u active"
+        else
+            bad "voiceime-$u 未运行（$st）— systemctl --user start voiceime-$u"
+        fi
+    done
+else
+    bad "voiceime-*.service 未安装（运行 ./install.sh 或手动装 systemd 单元）"
 fi
 
 echo ""

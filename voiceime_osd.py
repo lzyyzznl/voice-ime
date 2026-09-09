@@ -87,6 +87,8 @@ class OSD:
         self.visible = False
         self.have_rms = False   # 收到过 rms 才启用超时隐藏（防 show→首 rms 空窗闪烁）
         self.mode_b = False     # 录音模式：False=持续输入(A) 声波青蓝 / True=即停(B) 声波橙色
+        self.polish_state = None   # LLM 润色状态：None=空闲 / 'on'=润色中 / 'fail'=润色失败（短暂红后恢复）
+        self.polish_until = 0.0    # fail 状态的自动恢复时刻（monotonic）
         GLib.timeout_add(40, self.tick)
 
     def reposition(self):
@@ -119,6 +121,14 @@ class OSD:
                 self.last_data = time.monotonic()
                 if self.visible:
                     self.da.queue_draw()
+            elif msg.get("type") == "polish":
+                st = msg.get("state")
+                self.polish_state = st if st in ("on", "fail") else None
+                if st == "fail":
+                    self.polish_until = time.monotonic() + 1.5   # 红色显示 1.5s 后自动恢复
+                self.last_data = time.monotonic()
+                if self.visible:
+                    self.da.queue_draw()
             elif msg.get("type") == "quit":
                 Gtk.main_quit()
                 return False
@@ -130,6 +140,8 @@ class OSD:
         if (self.visible and self.have_rms
                 and time.monotonic() - self.last_data > TIMEOUT_MS / 1000):
             self.hide()                               # 超时无数据 → 隐藏
+        if self.polish_state == "fail" and time.monotonic() > self.polish_until:
+            self.polish_state = None                  # 失败红 1.5s 后自动恢复默认色
         if self.visible:
             self.display_rms += (self.target_rms - self.display_rms) * SMOOTH
             self.da.queue_draw()
@@ -147,6 +159,7 @@ class OSD:
         self.have_rms = False
         self.target_rms = 0
         self.display_rms = 0
+        self.polish_state = None
         self.win.hide()
 
     def on_draw(self, widget, cr):
@@ -178,9 +191,14 @@ class OSD:
         cr.set_source_rgba(FG[0], FG[1], FG[2], 0.9)
         cr.set_line_width(1.2)
         cr.stroke()
-        # 声波条：高度随 RMS，轻微相位差 → 波纹效果；颜色随录音模式
-        # （持续输入=亮绿，即停=橙色，Shift 单独按下切换）
-        bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
+        # 声波条：高度随 RMS，轻微相位差 → 波纹效果；颜色随录音模式/润色状态
+        # （持续输入=亮绿/青蓝，即停=橙色；润色中=亮黄提示等待，失败=红提示回落原文）
+        if self.polish_state == "fail":
+            bar_color = (1.0, 0.25, 0.25, 1.0)        # 润色失败：红
+        elif self.polish_state == "on":
+            bar_color = (1.0, 0.85, 0.25, 1.0)        # 润色中：亮黄
+        else:
+            bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
         rms = self.display_rms
         base = BAR_MIN_H + min(rms / 300.0, 1.0) * (BAR_MAX_H - BAR_MIN_H) * 0.75
         cy = ah / 2

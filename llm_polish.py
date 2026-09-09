@@ -13,11 +13,13 @@ api_key 字段：以 sk- 开头视为真实密钥直接使用；否则视为环�
 模型须返回 {"polished": "润色后文本"}，解析取 polished 字段。
 （JSON 模式 API 偶发返回空 content → 抛异常，调用方降级为原文。）
 """
+import http.client
 import json
 import os
 import re
 import ssl
-import urllib.request
+import threading
+import urllib.parse
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
@@ -71,6 +73,59 @@ def resolve_key(cfg):
     return v                            # 否则视为真实密钥
 
 
+_ctx = None          # 懒创建的 SSL 上下文（CERT_NONE，内网 MITM 兼容）
+_tls = threading.local()   # 每线程连接缓存（各 session 独立 worker 线程）
+
+
+def _ssl_ctx():
+    global _ctx
+    if _ctx is None:
+        c = ssl.create_default_context()
+        c.check_hostname = False
+        c.verify_mode = ssl.CERT_NONE
+        _ctx = c
+    return _ctx
+
+
+def _post(endpoint, body_bytes, timeout, auth=None):
+    """HTTP POST（JSON），TLS 连接按 (线程, endpoint) 复用；失效自动重连一次。
+
+    返回响应体 bytes。相比每次新建连接省去每句一次的 TLS 握手（~200ms）。
+    """
+    u = urllib.parse.urlsplit(endpoint)
+    if u.scheme != "https":
+        raise RuntimeError("endpoint 仅支持 https: %s" % endpoint)
+    cache = getattr(_tls, "conns", None)
+    if cache is None:
+        cache = _tls.conns = {}
+    headers = {"Content-Type": "application/json"}
+    if auth:
+        headers["Authorization"] = "Bearer " + auth
+    conn = cache.get(endpoint)
+    for attempt in (0, 1):   # 首试 + 断连重建一次
+        try:
+            if conn is None:
+                conn = http.client.HTTPSConnection(u.hostname, u.port or 443,
+                                                   timeout=timeout,
+                                                   context=_ssl_ctx())
+            conn.request("POST", u.path or "/", body=body_bytes, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+            if resp.status != 200:
+                raise RuntimeError("HTTP %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")))
+            cache[endpoint] = conn
+            return data
+        except (http.client.HTTPException, OSError, ssl.SSLError, RuntimeError) as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = None
+            if attempt == 1 or isinstance(e, RuntimeError):
+                raise e
+    raise RuntimeError("请求失败")   # 不可达（逻辑上不会到这）
+
+
 def polish(cfg, text, context=None, timeout=None):
     """润色 text（context 为上文原句列表），返回润色后的文本。
     失败抛异常，调用方负责降级为原文。"""
@@ -97,17 +152,8 @@ def polish(cfg, text, context=None, timeout=None):
         "temperature": 0,
         "response_format": {"type": "json_object"},   # JSON Output：保证可解析
     }
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + api_key})
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE   # 内网网关 HTTPS 拦截（与 asr_doubao 同）
-    with urllib.request.urlopen(req, timeout=timeout or DEFAULT_TIMEOUT,
-                                context=ctx) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = json.loads(_post(endpoint, json.dumps(body).encode("utf-8"),
+                            timeout or DEFAULT_TIMEOUT, auth=api_key).decode("utf-8"))
     raw = (data["choices"][0]["message"]["content"] or "").strip()
     if not raw:
         raise RuntimeError("模型返回空 content（JSON 模式偶发）")

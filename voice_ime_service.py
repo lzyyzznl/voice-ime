@@ -446,11 +446,14 @@ class VoiceIMEService:
 
     def _polish_loop(self, session):
         """会话串行润色线程：逐条取队列 → 润色（若标记）→ 上屏。
-        失败/超时提交原文（不丢字）。随会话（引擎连接）存续，daemon。"""
+        失败/超时提交原文（不丢字）。随会话（引擎连接）存续，daemon。
+        润色等待期间把原句放进候选栏（preedit），commit 后才清空——
+        消除 0.3-2s 的候选栏空白（用户说完话立即能看到自己说的内容）。"""
         while True:
             text, polish = session.polish_q.get()
-            out = text
             if polish:
+                session.send({"type": "preedit", "text": text})   # 先显示原文，别让候选栏空着
+                self._osd_send({"type": "polish", "state": "on"})          # P5: 声波变橙（润色中）
                 try:
                     cfg = llm_polish.load_cfg()
                     if cfg.get("auto_polish"):
@@ -461,8 +464,14 @@ class VoiceIMEService:
                         log.info("润色 %.2fs: %r -> %r", time.time() - t0, text, out)
                 except Exception as e:
                     log.warning("润色失败，提交原文: %s", e)
+                    self._osd_send({"type": "polish", "state": "fail"})    # P3: 声波变红（润色失败）
                     out = text
+                else:
+                    self._osd_send({"type": "polish", "state": "off"})     # 润色成功，恢复
+            else:
+                out = text
             self._send_commit(session, out, orig=text)
+            session.send({"type": "preedit", "text": ""})   # commit 已上屏，清空候选栏
             with session.lock:
                 session.polish_outstanding -= 1
                 if session.polish_outstanding <= 0:
@@ -483,7 +492,8 @@ class VoiceIMEService:
             self._draft_send({"type": "text", "mode": "final", "text": text})
         else:
             self._commit_text(session, text)   # 自动润色开启时先润色再上屏
-            session.send({"type": "preedit", "text": ""})   # 清空候选栏（录音状态由浮窗指示）
+            # preedit 清空由润色 worker 在 commit 后统一处理
+            # （此前这里立即清空会让润色等待期候选栏空白 0.3-2s）
 
     def start_session(self, session, silent=False):
         with session.lock:

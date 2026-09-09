@@ -86,11 +86,22 @@ def sanitize(patch):
                                     if isinstance(vv, (bool, int, str))}
                 clean[k] = d
             elif k == "llm":
-                clean[k] = {kk: vv for kk, vv in v.items()
-                            if kk in ("endpoint", "api_key", "model", "system_prompt", "prompt")
-                            and isinstance(vv, str)}
+                model_keys = ("id", "name", "endpoint", "api_key", "model", "system_prompt", "prompt")
+                d = {"active": v.get("active")} if isinstance(v.get("active"), str) else {}
                 if isinstance(v.get("auto_polish"), bool):
-                    clean[k]["auto_polish"] = v["auto_polish"]
+                    d["auto_polish"] = v["auto_polish"]
+                if isinstance(v.get("models"), list):
+                    ms = []
+                    for m in v["models"]:
+                        if not isinstance(m, dict):
+                            continue
+                        mm = {kk: vv for kk, vv in m.items()
+                              if kk in model_keys and isinstance(vv, str)}
+                        if mm.get("id"):
+                            ms.append(mm)
+                    if ms:
+                        d["models"] = ms
+                clean[k] = d
             else:  # osd
                 clean[k] = {kk: vv for kk, vv in v.items()
                             if kk in ("width", "height", "y_ratio") and isinstance(vv, (int, float))}
@@ -349,13 +360,22 @@ select option{background:var(--paper)}
 
   <section class="card">
     <div class="card-h"><h2>LLM 润色</h2><span class="hint">草稿窗「优化」+ 自动润色</span></div>
-    <p class="card-desc">服务端直连该 LLM 对转写文本做润色；API Key 填 sk- 开头的密钥，或填环境变量名（从环境读取）。</p>
+    <p class="card-desc">服务端直连该 LLM 对转写文本做润色；API Key 填 sk- 开头的密钥，或填环境变量名（从环境读取）。可配置多个模型并在下拉中切换（切换即持久化保存）。</p>
+    <div class="llm-grid">
+      <div class="f"><label for="llm_models">模型</label>
+        <select id="llm_models" style="width:100%"></select></div>
+      <div class="btns" style="display:flex;gap:8px">
+        <button type="button" class="btn ghost" id="btnAddModel" style="flex:1">＋ 新增模型</button>
+        <button type="button" class="btn ghost" id="btnDelModel" style="flex:1">删除当前</button>
+      </div>
+    </div>
     <div class="llm-grid">
       <div class="f"><label for="llm_endpoint">Endpoint</label><input type="text" id="llm_endpoint" spellcheck="false"></div>
       <div class="f"><label for="llm_model">模型</label><input type="text" id="llm_model" spellcheck="false"></div>
       <div class="f"><label for="llm_api_key">API Key</label><input type="text" id="llm_api_key" spellcheck="false"></div>
     </div>
-    <label class="sw" style="margin-top:14px"><input type="checkbox" id="llm_auto_polish"><span class="tr"></span><span class="n">自动润色</span><span class="d">每句上屏前先润色</span></label>
+    <div class="f" style="margin-top:10px"><label for="llm_name">模型名称</label><input type="text" id="llm_name" spellcheck="false" placeholder="下拉里显示的名字"></div>
+    <label class="sw" style="margin-top:14px"><input type="checkbox" id="llm_auto_polish"><span class="tr"></span><span class="n">自动润色</span><span class="d">每句上屏前先润色（对当前选中模型生效）</span></label>
     <div class="f" style="margin-top:14px"><label for="llm_system_prompt">System Prompt</label>
       <textarea id="llm_system_prompt" spellcheck="false"></textarea></div>
   </section>
@@ -418,17 +438,86 @@ const FIELD = [
   ["silence_after_input_sec", "silence_after_input_sec", "n", true],
   ["silence_rms_threshold", "silence_rms_threshold", "n", true],
   ["focus_lost_stop", "focus_lost_stop", "b", true],
-  ["llm_endpoint", "llm.endpoint", "s"],
-  ["llm_api_key",  "llm.api_key", "s"],
-  ["llm_model",    "llm.model", "s"],
   ["llm_auto_polish", "llm.auto_polish", "b"],
-  ["llm_system_prompt", "llm.system_prompt", "s"],
 ];
 const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
   enable_accelerate_text:false, enable_nonstream:true, show_utterances:true,
   end_window_size:800, force_to_speech_time:1000, accelerate_score:0 };
 
+function fillModels(cfg){
+  const llm = cfg && cfg.llm || {};
+  let ms = Array.isArray(llm.models) ? llm.models : [];
+  // 兼容旧扁平写法：把 llm.endpoint 等包成唯一模型
+  if (!ms.length && (llm.endpoint || llm.api_key || llm.model)){
+    ms = [{ id:"m0", name:"默认", endpoint:llm.endpoint||"", api_key:llm.api_key||"",
+            model:llm.model||"", system_prompt:llm.system_prompt||"" }];
+  }
+  window.__llmModels = ms;
+  window.__llmActive = ms.find(m => m.id === llm.active) ? llm.active : (ms[0] && ms[0].id) || "";
+  const sel = $("llm_models");
+  sel.innerHTML = "";
+  ms.forEach(m => { const o = document.createElement("option");
+    o.value = m.id; o.textContent = m.name || m.id || "未命名"; sel.appendChild(o); });
+  sel.value = window.__llmActive;
+  sel.onchange = () => { window.__llmActive = sel.value; fillModelFields(); };
+  fillModelFields();
+}
+function curModel(){
+  return (window.__llmModels || []).find(m => m.id === (window.__llmActive || $("llm_models").value));
+}
+function fillModelFields(){
+  const m = curModel() || {};
+  $("llm_endpoint").value = m.endpoint || "";
+  $("llm_model").value = m.model || "";
+  $("llm_api_key").value = m.api_key || "";
+  $("llm_name").value = m.name || "";
+  $("llm_system_prompt").value = m.system_prompt || "";
+}
+function saveModelFields(){
+  const m = curModel(); if (!m) return;
+  m.endpoint = $("llm_endpoint").value;
+  m.model = $("llm_model").value;
+  m.api_key = $("llm_api_key").value;
+  m.name = $("llm_name").value || m.name || m.id;
+  m.system_prompt = $("llm_system_prompt").value;
+  const sel = $("llm_models");
+  const o = sel.selectedOptions[0]; if (o) o.textContent = m.name;
+}
+$("btnAddModel").addEventListener("click", () => {
+  saveModelFields();
+  const id = "m" + Date.now();
+  const ms = window.__llmModels || [];
+  ms.push({ id:id, name:"新模型", endpoint:"https://api.deepseek.com/v1/chat/completions",
+            api_key:"", model:"deepseek-v4-flash", system_prompt:"" });
+  window.__llmActive = id;
+  const sel = $("llm_models");
+  const o = document.createElement("option"); o.value = id; o.textContent = "新模型";
+  sel.appendChild(o); sel.value = id;
+  fillModelFields(); $("llm_name").focus(); $("llm_name").select();
+});
+$("btnDelModel").addEventListener("click", () => {
+  const ms = window.__llmModels || []; if (!ms.length) return;
+  if (!confirm("删除当前选中的模型？")) return;
+  saveModelFields();
+  const i = ms.findIndex(m => m.id === window.__llmActive);
+  if (i >= 0) ms.splice(i, 1);
+  window.__llmActive = ms.length ? ms[0].id : "";
+  const sel = $("llm_models"); sel.innerHTML = "";
+  ms.forEach(m => { const o = document.createElement("option");
+    o.value = m.id; o.textContent = m.name || m.id || "未命名"; sel.appendChild(o); });
+  sel.value = window.__llmActive;
+  fillModelFields();
+});
+function collectLlm(){
+  saveModelFields();
+  const ms = window.__llmModels || [];
+  return { auto_polish: $("llm_auto_polish").checked,
+           active: window.__llmActive || (ms[0] && ms[0].id) || "",
+           models: ms };
+}
+
 function fillForm(cfg){
+  fillModels(cfg);
   for (const [id, path, type, ro] of FIELD){
     let v = getPath(cfg, path);
     if (v === undefined && path in FALLBACK) v = FALLBACK[path];
@@ -461,6 +550,7 @@ function collectCfg(){
     else v = el.value;
     setPath(cfg, path, v);
   }
+  cfg.llm = collectLlm();
   return cfg;
 }
 

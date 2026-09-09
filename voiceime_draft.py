@@ -46,13 +46,8 @@ POLL_MS = 40
 
 
 def load_llm_cfg():
-    """读 config.json 的 llm 段；缺失/异常返回空 dict"""
-    try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-        with open(path, encoding="utf-8") as f:
-            return (json.load(f).get("llm") or {}) or {}
-    except Exception:
-        return {}
+    """读 config.json 的 llm 段，展开当前生效模型（与核心服务一致）；异常返回空 dict"""
+    return llm_polish.load_cfg()
 
 
 class Draft:

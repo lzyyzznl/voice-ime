@@ -18,11 +18,17 @@
   "focus_lost_stop": false,
   "hold_ms": 300,
   "llm": {
-    "endpoint": "https://api.deepseek.com/v1/chat/completions",
-    "api_key": "sk-... 或环境变量名（如 DEEPSEEK_API_KEY）",
     "auto_polish": false,
-    "model": "deepseek-v4-flash",
-    "system_prompt": "你是文本润色助手。删除文本中的口头语、感叹词和重复（如 嗯、啊、那个、就是），修正不通顺的用词和语病（例如口语中\"提交上代码\"应改为\"提交下代码\"），识别口语中的自我纠正（例如\"XX，不对，应该是 YY\"、\"不是 XX，是 YY\"、\"XX，说错了，YY\"），删除被纠正的错误内容，只保留纠正后的表达，保持原意，使表达通顺自然。以 JSON 格式输出润色结果，形如：{\"polished\": \"润色后的完整文本\"}。只输出该 JSON 对象，不要输出任何其他内容。",
-    "prompt": "原文："
+    "active": "deepseek",
+    "models": [
+      {
+        "id": "deepseek",
+        "name": "DeepSeek 官方",
+        "endpoint": "https://api.deepseek.com/v1/chat/completions",
+        "api_key": "sk-... 或环境变量名（如 DEEPSEEK_API_KEY）",
+        "model": "deepseek-v4-flash",
+        "system_prompt": "你是文本润色助手。删除文本中的口头语、感叹词和重复（如 嗯、啊、那个、就是），修正不通顺的用词和语病（例如口语中\"提交上代码\"应改为\"提交下代码\"），识别口语中的自我纠正（例如\"XX，不对，应该是 YY\"、\"不是 XX，是 YY\"、\"XX，说错了，YY\"），删除被纠正的错误内容，只保留纠正后的表达，保持原意，使表达通顺自然。以 JSON 格式输出润色结果，形如：{\"polished\": \"润色后的完整文本\"}。只输出该 JSON 对象，不要输出任何其他内容。"
+      }
+    ]
   }
 }

@@ -26,12 +26,36 @@ CONTEXT_N = 3            # 随当前句一起发送的上文原句数
 
 
 def load_cfg():
-    """读 config.json 的 llm 段；缺失/异常返回空 dict（调用方按未启用处理）"""
+    """读 config.json 的 llm 段，展开为「当前生效模型」的扁平配置。
+
+    支持两种写法：
+    A) 多模型（配置台推荐）：
+        {"auto_polish": false, "active": "zte",
+         "models": [{"id","name","endpoint","api_key","model","system_prompt"}, ...]}
+       → 返回 active 指向模型的字段合并顶层 auto_polish/prompt。
+    B) 旧扁平写法（兼容，逐字透传）：
+        {"endpoint":..., "api_key":..., "model":..., ...}
+    缺失/异常返回空 dict（调用方按未启用处理）。
+    """
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
-            return (json.load(f).get("llm") or {})
+            llm = json.load(f).get("llm") or {}
     except Exception:
         return {}
+    models = llm.get("models")
+    if not (isinstance(models, list) and models):
+        return llm                       # 旧扁平写法：原样返回
+    active_id = str(llm.get("active") or "".join(
+        dict(models[0]).get("id", "") if isinstance(models[0], dict) else ""))
+    m = next((x for x in models
+              if isinstance(x, dict) and str(x.get("id")) == active_id), None)
+    if m is None:                        # active 指向不存在 → 用第一个，取 id 兜底
+        m = models[0]
+    m = dict(m) if isinstance(m, dict) else {}
+    for k in ("auto_polish", "prompt"):  # 顶层开关/公共字段合入当前模型
+        if llm.get(k) is not None:
+            m[k] = llm[k]
+    return m
 
 
 def resolve_key(cfg):

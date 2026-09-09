@@ -364,6 +364,7 @@ class VoiceIMEService:
             self.polish_idle.set()      # 队列清空时置位（stop 等它再发 done）
             self.recent = []            # 已上屏句子的原文（润色上下文，最多 CONTEXT_N 句）
             self.cancel_pending = False # 启动握手期收到 stop（对讲机松开）：握手完成后自停
+            self.stopping = False       # stop 已开始：on_final 停止即时提交，由 stop 统一收尾
 
     def _make_asr(self, session):
         """按 config.asr_backend 构造 ASR 客户端（icenter/doubao），回调接口一致"""
@@ -486,6 +487,11 @@ class VoiceIMEService:
         if not text:
             return
         with session.lock:
+            if session.stopping:
+                # stop 已开始（用户已松手）：不再即时提交，该句由 stop_session 的
+                # finals[committed:] 统一收尾。否则 on_final 与 stop 对同一 final
+                # 双提交 → 输入框重复输出（一句话即松手时高频复现）
+                return
             session.committed += 1
         # definite 已上屏该句：清兜底文本，防停止时重复提交
         session.last_interim_text = ""
@@ -502,6 +508,8 @@ class VoiceIMEService:
             if session.asr:
                 return   # 已在录音（浮窗持续指示中）
             session.cancel_pending = False   # 新 start 清除历史取消标记
+            session.stopping = False
+            session.committed = 0   # 本轮从零计数：不漏重置会跨轮错位 finals[committed:] 切片
             # 每次录音默认直接上屏：上一轮录音里切过的草稿模式不延续到本轮
             session.drafting = False
             # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
@@ -628,7 +636,6 @@ class VoiceIMEService:
             session.generation += 1
             new_gen = session.generation
             old_asr = session.asr
-            old_committed = session.committed
             session.asr = None
             session.rec.route_to(None)   # 切换窗口：音频进缓存
         try:
@@ -636,6 +643,10 @@ class VoiceIMEService:
         except Exception as e:
             log.warning("旧会话收尾异常: %s", e)
             finals = []
+        # stop 返回前 on_final 已同步处理完 finals（completed 在其后置位），重读最新
+        # committed；若在 stop 前读旧值，on_final 刚提交的句会被 rem 再次提交 → 重复
+        with session.lock:
+            old_committed = session.committed
         rem = "".join(finals[old_committed:]).strip()
         if not rem:
             # 兜底：服务端未返回 final（如切换瞬间仍在说话）时用累积 interim 文本
@@ -696,7 +707,7 @@ class VoiceIMEService:
             rec, asr = session.rec, session.asr
             session.rec = None
             session.asr = None
-            committed = session.committed
+            session.stopping = True   # 挡 on_final 即时提交，剩余统一由本函数收尾
         if rec is None and asr is None:
             # 会话本就空闲（观察者连接/重复 stop）：仅回 done。
             # 注意不能只看 asr：60s 切换的空窗期 asr=None 但 rec 仍在录音，
@@ -711,6 +722,11 @@ class VoiceIMEService:
             rec.stop_and_drain()
         self._osd_send({"type": "stop"})
         finals = asr.stop(timeout=5) if asr else []
+        # asr.stop() 阻塞期间 recv 线程仍可能处理迟到 final 并调 on_final；此时
+        # stopping=True 已挡掉即时提交。但 committed 必须读 asr.stop 返回后的最新值：
+        # 若在 stop 前读（旧值），on_final 已提交的句会被 remaining 再次覆盖 → 重复
+        with session.lock:
+            committed = session.committed
         if drop:
             # 焦点已切换：剩余内容丢弃（完整句已由 on_final 即时提交进原窗口），
             # 避免提交到切走后的新窗口

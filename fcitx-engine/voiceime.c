@@ -380,7 +380,14 @@ static void* recv_loop(void* arg)
 static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned int state)
 {
     VoiceIM* im = arg;
-    FCITX_UNUSED(state);
+
+    /* 用 fcitx 权威 mods 校准自维护标志：state 源自 X server 物理键盘状态，不会随
+       XIM 事件丢失。否则若某次 modifier 释放事件丢失（尤其 Shift 被 fcitx 用作切
+       输入法时），shift_down 会卡在 true，Ctrl+Alt 触发条件 !shift_down 永远不满足
+       → 无法呼出录音。state 权威 + 当前键自身叠加，正常无泄漏时与原逻辑一致。 */
+    im->ctrl_down  = !!(state & FcitxKeyState_Ctrl)  || is_ctrl(sym);
+    im->alt_down   = !!(state & FcitxKeyState_Alt)   || is_alt(sym);
+    im->shift_down = !!(state & FcitxKeyState_Shift) || is_shift(sym);
 
     dbg_log("DoInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
@@ -461,7 +468,12 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
 static INPUT_RETURN_VALUE VoiceIMDoReleaseInput(void* arg, FcitxKeySym sym, unsigned int state)
 {
     VoiceIM* im = arg;
-    FCITX_UNUSED(state);
+
+    /* 与 DoInput 同：用 state 校准自维护标志，防 modifier 释放事件丢失导致状态卡死 */
+    im->ctrl_down  = !!(state & FcitxKeyState_Ctrl)  || is_ctrl(sym);
+    im->alt_down   = !!(state & FcitxKeyState_Alt)   || is_alt(sym);
+    im->shift_down = !!(state & FcitxKeyState_Shift) || is_shift(sym);
+
     dbg_log("DoReleaseInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 

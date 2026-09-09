@@ -363,6 +363,7 @@ class VoiceIMEService:
             self.polish_idle = threading.Event()
             self.polish_idle.set()      # 队列清空时置位（stop 等它再发 done）
             self.recent = []            # 已上屏句子的原文（润色上下文，最多 CONTEXT_N 句）
+            self.cancel_pending = False # 启动握手期收到 stop（对讲机松开）：握手完成后自停
 
     def _make_asr(self, session):
         """按 config.asr_backend 构造 ASR 客户端（icenter/doubao），回调接口一致"""
@@ -496,9 +497,11 @@ class VoiceIMEService:
             # （此前这里立即清空会让润色等待期候选栏空白 0.3-2s）
 
     def start_session(self, session, silent=False):
+        # ── 锁快路径：仅毫秒级状态重置，绝不在此持锁做网络握手 ──
         with session.lock:
             if session.asr:
                 return   # 已在录音（浮窗持续指示中）
+            session.cancel_pending = False   # 新 start 清除历史取消标记
             # 每次录音默认直接上屏：上一轮录音里切过的草稿模式不延续到本轮
             session.drafting = False
             # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
@@ -506,18 +509,45 @@ class VoiceIMEService:
             # 长按触发即显示浮窗：浮窗出现 = 可开始说话
             # （服务端已收到 start 命令，引擎↔服务端连接就绪；ASR 握手期音频缓存补发）
             self._osd_send({"type": "show"})
-            try:
-                asr = self._make_asr(session)
-            except Exception as e:
-                log.error("ASR 启动失败: %s", e)
-                self._osd_send({"type": "stop"})   # 隐藏浮窗，避免"可说话"误导
-                if session.drafting:
-                    self._draft_send({"type": "text", "mode": "interim", "text": f"ASR 失败: {e}"})
-                else:
-                    session.send({"type": "preedit", "text": f"ASR 失败: {e}"})
+        # ── 锁外建立 ASR（网络握手，可能数百 ms~数秒）。stop 分支（handle）也需要取
+        #    session.lock 置 cancel_pending；锁内握手会让 client_loop 阻塞在握手上，
+        #    慢/挂起的 doubao 连接会冻结整个控制通道（模式/草稿/激活全无响应）──
+        try:
+            asr = self._make_asr(session)
+        except Exception as e:
+            log.error("ASR 启动失败: %s", e)
+            self._osd_send({"type": "stop"})   # 隐藏浮窗，避免"可说话"误导
+            if session.drafting:
+                self._draft_send({"type": "text", "mode": "interim", "text": f"ASR 失败: {e}"})
+            else:
+                session.send({"type": "preedit", "text": f"ASR 失败: {e}"})
+            session.send({"type": "done", "ok": False})
+            return
+        # ── 锁内：取消检查 + 挂接 ASR + 装配录音流，与 stop/cancel_session 串行 ──
+        with session.lock:
+            # 对讲机模式：握手期间用户已松开（stop 先于 started 到达）→ 放弃本次录音
+            if session.cancel_pending:
+                session.cancel_pending = False
+                log.info("握手期收到 stop（松开过早），放弃本次录音")
+                try:
+                    asr.close()
+                except Exception:
+                    pass
+                self._osd_send({"type": "stop"})
                 session.send({"type": "done", "ok": False})
                 return
+            # 并发 start 已在本握手期间 attach（新会话已接管）：丢本次结果
+            if session.asr is not None:
+                log.info("并发 start 接管，丢弃握手结果")
+                try:
+                    asr.close()
+                except Exception:
+                    pass
+                return
             session.asr = asr
+            # ── 以下装配必须与原 asr 挂接在同一锁块内（毫秒级）：若放锁外，
+            #    stop 在放锁后、started 前到达会先停掉已挂的 asr/rec，随后本处
+            #    再发 started → 引擎 recording=true 但录音流已死，会话卡住 ──
             chunk_bytes = self.cfg["sample_rate"] * 2 * self.cfg.get("chunk_ms", 200) // 1000
             silence_sec = int(self.cfg.get("silence_timeout_sec", 15) or 0)
             rms_threshold = int(self.cfg.get("silence_rms_threshold", 300))
@@ -546,24 +576,24 @@ class VoiceIMEService:
             session.rec.start()
             session.rec.route_to(asr)      # 录音 → 当前 ASR（启动窗口的音频已缓存，接管后补发）
             session.rec.flush_pending()
-            if not silent:
-                _play_beep(BEEP_START)
-            session.send({"type": "started"})   # 引擎据此同步 recording=true
-            with self.clients_lock:
-                self._rec_count += 1
-            self._tray_state()
-            # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
-            # 60s 上限（iCenter 单次会话限制）：静默切换 ASR 会话续录，
-            # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
-            def auto_stop():
-                time.sleep(60)
-                self.switch_session(session, gen)
-            threading.Thread(target=auto_stop, daemon=True).start()
+            session.send({"type": "started"})   # 引擎据此同步 recording=true（锁内发，防窗口竞态）
+        if not silent:
+            _play_beep(BEEP_START)
+        with self.clients_lock:
+            self._rec_count += 1
+        self._tray_state()
+        # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
+        # 60s 上限（iCenter 单次会话限制）：静默切换 ASR 会话续录，
+        # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
+        def auto_stop():
+            time.sleep(60)
+            self.switch_session(session, gen)
+        threading.Thread(target=auto_stop, daemon=True).start()
 
-            # focus_lost_stop=true：失去焦点自动停止录音并释放麦克风
-            if self.cfg.get("focus_lost_stop", False) and self._xfocus.current() is not None:
-                threading.Thread(target=self._watch_focus,
-                                 args=(session, gen), daemon=True).start()
+        # focus_lost_stop=true：失去焦点自动停止录音并释放麦克风
+        if self.cfg.get("focus_lost_stop", False) and self._xfocus.current() is not None:
+            threading.Thread(target=self._watch_focus,
+                             args=(session, gen), daemon=True).start()
 
     def _watch_focus(self, session, gen):
         """录音期间轮询 X 焦点；焦点离开启动窗口 → 自动停止（丢弃剩余，避免提交到新窗口）"""
@@ -760,6 +790,9 @@ class VoiceIMEService:
         if cmd == "start":
             threading.Thread(target=self.start_session, args=(session,), daemon=True).start()
         elif cmd == "stop":
+            # 对讲机松开/ESC：标记取消（覆盖启动握手期：start_session 完成握手后自停）
+            with session.lock:
+                session.cancel_pending = True
             if session.rec or session.asr:
                 # 引擎等录音连接：会话级停止（rec/asr 任一存在即会话活动中，
                 # 含 60s 切换空窗期 asr=None 但 rec 在录音的情况）
@@ -796,11 +829,17 @@ class VoiceIMEService:
         elif cmd == "ping":
             session.send({"type": "ready"})
         elif cmd == "draft":
-            # 引擎：录音中单按 Ctrl → 切换本会话输出到草稿窗口（再按切回上屏），并弹出草稿
+            # 引擎：切草稿模式（A 持续录音中单按 Ctrl / 空闲 Ctrl+Alt+Shift）
             session.drafting = not session.drafting
             log.info("draft 切换: drafting=%s", session.drafting)
             if session.drafting:
                 self._draft_send({"type": "show"})
+                # 把最近已上屏的历史句带入草稿（recent = 语义句原文，最多 CONTEXT_N 句），
+                # 方便连录多段后统一编辑/优化
+                with session.lock:
+                    history = list(session.recent)
+                for line in history:
+                    self._draft_send({"type": "text", "mode": "final", "text": line})
 
     def run(self):
         init_beeps()

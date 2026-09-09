@@ -2,8 +2,10 @@
  * fcitx-voiceime: 语音输入法引擎（fcitx 4）
  * ============================================
  * 通过 Unix socket 与 Python 语音服务（voice_ime_service.py）通信：
- *   - 长按 Ctrl+Alt ≥500ms → 通知服务开始录音（桌面浮窗声波动画指示）
- *   - Escape → 停止并提交
+ *   - Ctrl+Alt 按住 ≥300ms 触发录音（防误触）
+ *   - 松开 Ctrl/Alt：对讲机 B 模式 → 停止并提交（默认）
+ *   - Ctrl+Tab 切换 B 对讲机 / A 持续模式；A 下 Escape 停止提交
+ *   - 录音中单独 Ctrl（A）或空闲 Ctrl+Alt+Shift 三键（B）→ 切草稿窗
  *   - ASR 中间结果 → preedit 实时更新（20ms 主循环轮询队列）
  *
  * 不依赖剪贴板：文本经 fcitx 的 XIM 管线直接提交。
@@ -59,10 +61,11 @@ typedef struct _VoiceIM {
     boolean shift_down;             /* Shift 按下状态 */
     boolean shift_solo;             /* Shift 单独按下（期间无其他键）→ 释放时切模式 */
     boolean ctrl_solo;              /* Ctrl 单独按下（期间无其他键）→ 录音中释放时切草稿 */
-    boolean mode_b;                 /* 录音模式：false=持续输入(A) true=即停(B) */
+    boolean mode_b;                 /* 录音模式：false=持续输入(A) true=对讲机(B，按住说松开停) */
     boolean armed;                  /* Ctrl+Alt 已按下，等待 hold_ms 判定 */
     boolean triggered;              /* 本次按下已触发（防 repeat） */
     boolean esc_pressed;            /* Escape 按下状态（防 repeat） */
+    boolean tri_pressed;            /* Ctrl+Alt+Shift 三键齐按过（空闲松手切草稿） */
     int hold_ms;                    /* 长按触发阈值（服务端 config 下发） */
     struct timespec press_time;     /* Ctrl+Alt 同时按下的时刻 */
     volatile gboolean recv_running;
@@ -77,6 +80,7 @@ static void* recv_loop(void* arg);  /* 前向声明（restart_recv 使用） */
 static void refresh_ui(VoiceIM* im);  /* 前向声明 */
 static void toggle_rec_mode(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void toggle_draft(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
+static void stop_and_submit(VoiceIM* im);  /* 前向声明（DoInput 使用） */
 
 /* ─────────────────────────── IPC ─────────────────────────── */
 
@@ -219,9 +223,12 @@ static void poll_queue_cb(void* data)
             im->shift_solo = false; /* 同上：不误切录音模式 */
             if (!im->recording) {
                 im->recording = true;
-                im->mode_b = false;   /* 每次录音默认持续模式（蓝色）；Shift 仅切换当次会话 */
-                send_cmd(im, "{\"cmd\":\"mode\",\"b\":0}");   /* 同步服务端/浮窗 */
-                dbg_log("长按触发 start（默认持续模式）");
+                /* 模式保持用户当前选择（默认对讲机 B；Ctrl+Tab 可切持续 A），
+                   不再每次强制持续模式 */
+                send_cmd(im, im->mode_b
+                              ? "{\"cmd\":\"mode\",\"b\":1}"
+                              : "{\"cmd\":\"mode\",\"b\":0}");
+                dbg_log("长按触发 start（%s）", im->mode_b ? "对讲机 B" : "持续 A");
                 send_cmd(im, "{\"cmd\":\"start\"}");
                 /* 录音指示由桌面浮窗（声波动画）呈现，不再显示文字 */
             }
@@ -255,6 +262,7 @@ static void poll_queue_cb(void* data)
                 im->shift_down = false;
                 im->shift_solo = false;
                 im->ctrl_solo = false;
+                im->tri_pressed = false;
                 im->armed = false;
                 im->triggered = false;
                 clear_preedit(im);
@@ -374,10 +382,10 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
     VoiceIM* im = arg;
     FCITX_UNUSED(state);
 
-    dbg_log("DoInput sym=%lu ctrl=%d alt=%d recording=%d", (unsigned long)sym,
-            im->ctrl_down, im->alt_down, im->recording);
+    dbg_log("DoInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
+            im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
-    /* 非 Shift 键按下 → 取消"Shift 单独按下"标记（Shift+字母=大写，不切模式） */
+    /* 非 Shift 键按下 → 取消"Shift 单独按下"标记 */
     if (!is_shift(sym))
         im->shift_solo = false;
     /* 非 Ctrl 键按下 → 取消"Ctrl 单独按下"标记（Ctrl+C 等组合键不切草稿） */
@@ -387,15 +395,17 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
     if (is_ctrl(sym)) {
         im->ctrl_down = true;
         im->ctrl_solo = true;        /* 单独按下；若期间按了其他键会被上方取消 */
-        if (im->alt_down && !im->armed && !im->triggered) {
-            im->armed = true;                    /* 开始等待 500ms 判定 */
+        /* Ctrl+Alt（无 Shift）→ armed 等待 hold_ms 判定；
+           Ctrl+Alt+Shift → 三键切草稿，不触发录音 */
+        if (im->alt_down && !im->shift_down && !im->triggered) {
+            im->armed = true;
             clock_gettime(CLOCK_MONOTONIC, &im->press_time);
         }
-        return IRV_TO_PROCESS;   /* 透传：不消费修饰键，fcitx 快捷键（切 IM 等）正常 */
+        return IRV_TO_PROCESS;
     }
     if (is_alt(sym)) {
         im->alt_down = true;
-        if (im->ctrl_down && !im->armed && !im->triggered) {
+        if (im->ctrl_down && !im->shift_down && !im->triggered) {
             im->armed = true;
             clock_gettime(CLOCK_MONOTONIC, &im->press_time);
         }
@@ -404,17 +414,26 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
     if (is_shift(sym)) {
         im->shift_down = true;
         im->shift_solo = true;
+        /* Ctrl+Alt+Shift 三键齐按：空闲时切草稿（松手触发）。取消 armed 防误启录音 */
+        if (im->ctrl_down && im->alt_down) {
+            im->tri_pressed = true;
+            im->armed = false;
+            im->triggered = true;    /* 防 repeat：三键松手前不再误触发录音 */
+            dbg_log("三键齐按：待松手切草稿");
+        }
         return IRV_TO_PROCESS;
+    }
+
+    /* Ctrl+Tab（Ctrl 按住、无 Alt/Shift）→ 切换录音模式 A/B */
+    if (sym == FcitxKey_Tab && im->ctrl_down && !im->alt_down && !im->recording) {
+        toggle_rec_mode(im);
+        return IRV_DO_NOTHING;   /* 消费，避免切换输入焦点 */
     }
 
     if (sym == FcitxKey_Escape) {
         if (im->recording && !im->esc_pressed) {
             im->esc_pressed = true;              /* 防 repeat */
-            im->recording = false;
-            dbg_log("Escape 停止录音");
-            send_cmd(im, "{\"cmd\":\"stop\"}");
-            clear_preedit(im);
-            refresh_ui(im);
+            stop_and_submit(im);
             return IRV_DO_NOTHING;
         }
         if (im->recording)
@@ -443,19 +462,33 @@ static INPUT_RETURN_VALUE VoiceIMDoReleaseInput(void* arg, FcitxKeySym sym, unsi
 {
     VoiceIM* im = arg;
     FCITX_UNUSED(state);
-    dbg_log("DoReleaseInput sym=%lu ctrl=%d alt=%d recording=%d", (unsigned long)sym,
-            im->ctrl_down, im->alt_down, im->recording);
+    dbg_log("DoReleaseInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
+            im->ctrl_down, im->alt_down, im->shift_down, im->recording);
+
     if (is_ctrl(sym)) {
-        if (im->ctrl_solo && im->recording)
-            toggle_draft(im);   /* 录音中单独按 Ctrl 并释放 → 切换草稿模式 */
+        /* A 持续模式录音中单独按 Ctrl 并释放 → 切草稿（对讲机 B 录音时 Ctrl 是触发
+           键且 ctrl_solo 已在触发时清除，不会误切） */
+        if (im->ctrl_solo && im->recording && !im->mode_b)
+            toggle_draft(im);
+        /* 对讲机 B：松开触发键之一即停止提交（按住=说，松开=停） */
+        if (im->mode_b && im->triggered && im->recording)
+            stop_and_submit(im);
         im->ctrl_down = false;
         im->ctrl_solo = false;
     }
-    else if (is_alt(sym))
+    else if (is_alt(sym)) {
+        /* 对讲机 B：松开触发键之一即停止提交 */
+        if (im->mode_b && im->triggered && im->recording)
+            stop_and_submit(im);
         im->alt_down = false;
+    }
     else if (is_shift(sym)) {
-        if (im->shift_solo)
-            toggle_rec_mode(im);   /* 单独按 Shift 并释放 → 切换录音模式 */
+        /* Ctrl+Alt+Shift 三键齐按后松开 Shift → 空闲切草稿（对讲机模式入口） */
+        if (im->tri_pressed) {
+            im->tri_pressed = false;
+            dbg_log("三键松手：切换草稿模式");
+            toggle_draft(im);
+        }
         im->shift_down = false;
         im->shift_solo = false;
     }
@@ -463,10 +496,11 @@ static INPUT_RETURN_VALUE VoiceIMDoReleaseInput(void* arg, FcitxKeySym sym, unsi
         im->esc_pressed = false;
 
     /* 两键全部释放：重置长按判定状态。
-       未触发（<500ms 松开）→ 本次作废，不算误触；已触发 → 允许下次再触发 */
+       未触发（<hold_ms 松开）→ 本次作废，不算误触；已触发 → 允许下次再触发 */
     if (!im->ctrl_down && !im->alt_down) {
         im->armed = false;
         im->triggered = false;
+        im->tri_pressed = false;   /* 三键未完成（先松了 Ctrl/Alt）也清，防悬挂 */
     }
     return IRV_DO_NOTHING;
 }
@@ -484,21 +518,34 @@ static void stop_recording_on_lost_focus(VoiceIM* im)
     }
 }
 
-/* 单独按 Shift → 切换录音模式（A 持续输入 ⇄ B 即停），上报服务端转浮窗显示 */
+/* 单独按 Ctrl+Tab → 切换录音模式（A 持续输入 ⇄ B 对讲机），上报服务端转浮窗显示。
+   不用 Shift：fcitx 里 Shift 单按被绑定为切输入法，会切走 voiceime。 */
 static void toggle_rec_mode(VoiceIM* im)
 {
     im->mode_b = !im->mode_b;
-    dbg_log("录音模式切换: %s", im->mode_b ? "即停(B)" : "持续(A)");
+    dbg_log("录音模式切换: %s", im->mode_b ? "对讲机(B)" : "持续(A)");
     send_cmd(im, im->mode_b
                   ? "{\"cmd\":\"mode\",\"b\":1}"
                   : "{\"cmd\":\"mode\",\"b\":0}");
 }
 
-/* 录音中单独按 Ctrl → 切换输出到草稿窗口（再按切回直接上屏），服务端处理 */
+/* 切草稿模式：A 持续录音中单独按 Ctrl，或任意时刻 Ctrl+Alt+Shift 三键 */
 static void toggle_draft(VoiceIM* im)
 {
-    dbg_log("录音中单按 Ctrl：切换草稿模式");
+    dbg_log("切换草稿模式");
     send_cmd(im, "{\"cmd\":\"draft\"}");
+}
+
+/* 停止并提交当前录音（对讲机模式松开触发键 / Escape 共用） */
+static void stop_and_submit(VoiceIM* im)
+{
+    if (!im->recording)
+        return;
+    im->recording = false;
+    dbg_log("停止并提交（松开触发键/Escape）");
+    send_cmd(im, "{\"cmd\":\"stop\"}");
+    clear_preedit(im);
+    refresh_ui(im);
 }
 
 static void VoiceIMReset(void* arg)
@@ -550,7 +597,8 @@ static boolean VoiceIMInit(void* arg)
     if (im->owner)
         FcitxInstanceAddTimeout(im->owner, 20, poll_queue_cb, im);   /* 主线程轮询队列 */
     send_im_active(im, 1);   /* IM 被激活（切到语音输入法）→ 托盘显示麦克风 */
-    send_cmd(im, "{\"cmd\":\"mode\",\"b\":0}");   /* 上报初始模式（持续输入）→ 浮窗显示 */
+    im->mode_b = true;       /* 默认对讲机 B：按住说、松开停（Ctrl+Tab 可切持续 A） */
+    send_cmd(im, "{\"cmd\":\"mode\",\"b\":1}");   /* 上报初始模式 → 浮窗显示 */
     dbg_log("VoiceIMInit 完成: sock=%d recv_thread=%p", im->sock, (void*)im->recv_thread);
     return true;
 }
@@ -564,6 +612,7 @@ static void* VoiceIMCreate(FcitxInstance* instance)
     im->sock = -1;
     pthread_mutex_init(&im->send_lock, NULL);
     im->recording = false;
+    im->mode_b = true;       /* 默认对讲机 B（按住说松开停） */
     im->hold_ms = HOLD_MS_DEFAULT;
     im->queue = g_async_queue_new();
     g_voiceim = im;

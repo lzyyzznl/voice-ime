@@ -3,13 +3,13 @@
 > **安装与使用：见 [INSTALL.md](INSTALL.md)**（面向 AI 代理的分步指南）
 
 在 ZTE 内网环境下，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
-**长按 Ctrl+Alt ≥0.3s** 开始录音（可松手），**按 Escape** 停止提交——全程不碰剪贴板。
+**默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**——不碰剪贴板，一句话说完松手即可。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    U[长按 Ctrl+Alt 说话] --> E[fcitx 引擎 voiceime.c<br/>fcitx4 IM addon]
+    U[按住 Ctrl+Alt 说话<br/>（松开即停，Ctrl+Tab 切持续 A）] --> E[fcitx 引擎 voiceime.c<br/>fcitx4 IM addon]
     E -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
     S -->|"parec 16kHz PCM<br/>200ms 音频帧 + 60s 切换缓存"| R[Recorder]
     R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 nostream 双向流式]
@@ -37,7 +37,7 @@ flowchart LR
 ```
 voice-ime/
 ├── fcitx-engine/            # fcitx 引擎（C 插件，fcitx4）
-│   ├── voiceime.c           # 引擎主体：拦截 Ctrl+Alt、commit/preedit
+│   ├── voiceime.c           # 引擎主体：拦截 Ctrl+Alt 对讲机、Ctrl+Tab 切模式、commit/preedit
 │   ├── fcitx-voiceime.conf  # addon 配置
 │   └── Makefile             # make && sudo make install
 ├── icons/                   # 图标（gen_icons.py + SVG）
@@ -58,10 +58,22 @@ voice-ime/
 
 ## 使用
 
+对讲机（默认，B）：按住 Ctrl+Alt 说话，**松开即停**并上屏。一句话说完松手即可。
+持续（A）：按 **Ctrl+Tab** 切过去，按住 ≥0.3s 触发录音后**可松手继续说**，说完按 **Escape** 停止提交。
+
+| 按键 | 作用 |
+|---|---|
+| **Ctrl+Alt 按住** | 开始录音（≥0.3s 防误触，提示音 + 声波浮窗） |
+| **松开 Ctrl/Alt** | B 对讲机：停止并上屏 |
+| **Ctrl+Tab** | 切换 A 持续 / B 对讲机模式（默认 B） |
+| **Escape** | A 持续模式：停止提交 |
+| **单独按 Ctrl** | A 持续录音中：切草稿窗（再按切回） |
+| **Ctrl+Alt+Shift 三键** | B 对讲机空闲时：切草稿窗 |
+
 1. 输入法切换到「语音输入」
 2. 聚焦目标输入框
-3. **按住 Ctrl+Alt ≥0.3s** 开始录音（提示音 + 声波浮窗；可松手）
-4. 停顿处句子自动上屏（VAD 500ms 定稿）；**按 Escape** 停止提交
+3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停上屏；或 **Ctrl+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
+4. 停顿处句子自动上屏（VAD 500ms 定稿）
 5. `auto_polish: true`（Web 配置台开关）时每句先经 LLM 润色再上屏
 
 **自动润色行为**（`llm.auto_polish`）：
@@ -71,7 +83,11 @@ voice-ime/
 - 积压降级：前一句未润色完时新句直接原文上屏（保顺序，延迟有上界）
 - 失败/超时（8s）自动回落原文，不丢字
 
-**草稿模式**：录音中单独按一下 Ctrl → 弹出草稿窗，后续内容进草稿不上屏；再按 Ctrl 切回。草稿窗内可手改识别错误的专名后点「优化」（LLM 润色，成功自动复制并约 2s 后关窗）。
+**草稿模式**：录音中单独按一下 Ctrl（A 持续）或空闲时按 Ctrl+Alt+Shift 三键（B 对讲机）→ 弹出草稿窗，后续内容进草稿不上屏；Esc 关窗退出。草稿窗支持：
+- 自动带入最近已上屏的历史句（最多 3 句），方便连录后统一整理
+- **增量追加**：识别流只往文末加字，**你正在编辑的光标/手动修改不被识别流打断**（光标不飘）
+- 底部按钮：**【复制全部】**一键复制原文、【优化】LLM 润色（成功**不自动关窗、不自动复制**，可手改后再复制）、【复制优化结果】复制润色结果
+- **Esc** 关窗并退出草稿模式
 
 **Web 配置台**：浏览器开 `http://127.0.0.1:19530`——改 ASR/润色参数、管理多个 LLM 模型（下拉切换、增删、持久化保存）、看实时日志、一键重启。
 

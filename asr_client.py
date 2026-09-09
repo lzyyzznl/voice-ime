@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.request
 
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
 log = logging.getLogger("asr")
@@ -168,9 +169,12 @@ class StreamingASR:
                 elif name == "heartbeat":
                     self.ws.send(json.dumps({"type": "pong"}))
         except Exception as e:
-            if not self._completed.is_set():
-                self._error = f"接收线程异常: {e}"
-                log.error("%s", self._error)
+            # 主动 close()（早松手对讲机/切换）关闭连接时 recv 会抛 ConnectionClosed，
+            # 属正常关闭，不算错误
+            if not isinstance(e, ConnectionClosed):
+                if not self._completed.is_set():
+                    self._error = f"接收线程异常: {e}"
+                    log.error("%s", self._error)
             self._completed.set()
 
     # ── 发送 ──

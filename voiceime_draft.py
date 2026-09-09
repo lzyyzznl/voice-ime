@@ -54,7 +54,12 @@ class Draft:
     def __init__(self):
         self.lines = []        # 已完成的句子（一行一句）
         self.current = ""      # 正在识别的当前句
-        self.optimized = False # 优化是否成功（复制优先复制优化结果）
+        self.optimized = False # 优化是否成功
+        self.tail_mark = None      # 当前句预览尾巴起点 mark（interim 占位，可删）
+        self._pending_final = ""   # 待追加的定稿句（UDP 循环内累积，GTK 主循环统一刷新）
+        self._pending_current = "" # 待更新的当前句预览
+        self._dirty = False
+        self._shown = ""
         self.win = Gtk.Window(title="voice-ime 草稿")
         self.win.set_default_size(WIN_W, WIN_H)
         self.win.set_resizable(False)      # 固定尺寸，不可缩放
@@ -83,12 +88,18 @@ class Draft:
         sw_res.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sw_res.add(self.tv_res)
 
-        # 按钮栏：仅一个居中的优化按钮（状态提示在按钮上方）
+        # 按钮栏：居中【复制全部】【优化】【复制优化结果】（状态提示在按钮上方）
+        btn_copy = Gtk.Button(label="复制全部")
+        btn_copy.connect("clicked", self.on_copy_all)
         btn_opt = Gtk.Button(label="优化")
         btn_opt.connect("clicked", self.on_optimize)
-        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        btn_copy_res = Gtk.Button(label="复制优化结果")
+        btn_copy_res.connect("clicked", self.on_copy_result)
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         hb.pack_start(Gtk.Box(), True, True, 0)   # 左右占位 → 按钮居中
+        hb.pack_start(btn_copy, False, False, 0)
         hb.pack_start(btn_opt, False, False, 0)
+        hb.pack_start(btn_copy_res, False, False, 0)
         hb.pack_start(Gtk.Box(), True, True, 0)
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -100,6 +111,9 @@ class Draft:
         vbox.pack_start(self.lbl_status, False, False, 0)
         vbox.pack_start(hb, False, False, 0)
         self.win.add(vbox)
+
+        # Esc 关窗退出草稿模式（焦点在窗口内时）
+        self.win.connect("key-press-event", self.on_key_press)
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(UDP_ADDR)
@@ -124,6 +138,9 @@ class Draft:
         self.lines = []
         self.current = ""
         self.optimized = False
+        self._pending_final = ""
+        self._pending_current = ""
+        self.tail_mark = None
         self.buf.set_text("")
         self.buf_res.set_text("")
         self.lbl_status.set_text("")
@@ -146,31 +163,124 @@ class Draft:
                 if mode == "final":
                     if text:
                         self.lines.append(text)
+                        self._pending_final += ((" " if self._pending_final or self.current else "") + text)
                     self.current = ""
+                    self._pending_current = ""
                 else:
                     self.current = text
-                self.refresh()
+                    self._pending_current = text
             elif t == "show":
                 self.win.show_all()
                 self.win.present()          # 置顶显示（不抢焦点）
             elif t == "clear":
                 self.lines = []
                 self.current = ""
-                self.refresh()
+                self._pending_final = ""
+                self._pending_current = ""
+                self._drop_tail()
+                self.buf.set_text("")
+                self.buf_res.set_text("")
             elif t == "quit":
                 Gtk.main_quit()
                 return False
+        if self._pending_final or self._pending_current or self._dirty:
+            self._dirty = False
+            self.refresh()
         return True
 
+    def _drop_tail(self):
+        """删除文末的当前句预览尾巴（interim 占位），保留已完成句与用户编辑"""
+        if self.tail_mark is None:
+            return
+        try:
+            start = self.buf.get_iter_at_mark(self.tail_mark)
+            end = self.buf.get_end_iter()
+            if start.compare(end) < 0:
+                self.buf.delete(start, end)
+        except Exception:
+            pass
+        self.tail_mark = None
+
+    def _append_permanent(self, text):
+        """把一条定稿句追加到文末（成为永久内容）"""
+        if not text:
+            return
+        end = self.buf.get_end_iter()
+        prefix = ""
+        if not end.starts_line():
+            # 前面已有内容：取最后一个字符判断是否需补空格
+            prev = end.copy()
+            prev.backward_char()
+            ch = prev.get_char()
+            if ch not in (" ", "\n"):
+                prefix = " "
+        self.buf.insert(end, prefix + text)
+
+    def _append_tail(self, text):
+        """把当前句预览追加到文末并记尾巴 mark（下次 interim 先删再插）"""
+        self._drop_tail()
+        if not text:
+            return
+        end = self.buf.get_end_iter()
+        prefix = ""
+        if not end.starts_line():
+            prev = end.copy()
+            prev.backward_char()
+            if prev.get_char() not in (" ", "\n"):
+                prefix = " "
+        self.buf.insert(end, prefix + text)
+        # mark 落在插入内容起点（left_gravity：删除时随左侧移动，稳定指向尾巴头）
+        self.tail_mark = self.buf.create_mark(None, self.buf.get_iter_at_offset(
+            self.buf.get_end_iter().get_offset() - len(prefix + text)), True)
+
     def draft_text(self):
-        """当前草稿全文（完成句 + 未完成当前句）；停顿分句不换行，空格连接成连续文本"""
-        parts = list(self.lines)
-        if self.current:
-            parts.append(self.current)
-        return " ".join(parts)
+        """当前草稿全文（buffer 内容，含已完成句 + 可能的当前句尾巴）"""
+        return self.buf.get_text(self.buf.get_start_iter(),
+                                 self.buf.get_end_iter(), True)
 
     def refresh(self):
-        self.buf.set_text(self.draft_text())
+        """按服务端消息刷新：定稿句永久追加、interim 做可替换尾巴。
+        全程只动文末，绝不 set_text 全量重建——用户的光标位置和手动编辑
+        在识别流继续时保持不动。"""
+        if self._pending_final:
+            self._append_permanent(self._pending_final)
+            self._pending_final = ""
+        if self._pending_current:
+            self._append_tail(self._pending_current)
+            self._pending_current = ""
+        elif self.tail_mark is not None:
+            self._drop_tail()   # 定稿后清掉旧预览尾巴
+        if self.buf_res.get_text(self.buf_res.get_start_iter(),
+                                 self.buf_res.get_end_iter(), True).strip():
+            self.buf_res.set_text("")   # 原文变化清掉旧优化结果（内容已变，结果过期）
+        self._shown = self.draft_text()
+
+    def on_copy_all(self, w):
+        """复制原文区全部内容到剪贴板"""
+        text = self.buf.get_text(self.buf.get_start_iter(),
+                                 self.buf.get_end_iter(), True).strip()
+        if not text:
+            self.lbl_status.set_text("草稿为空，没有可复制的内容。")
+            return
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+        self.lbl_status.set_text("已复制 %d 字" % len(text))
+
+    def on_copy_result(self, w):
+        """复制优化结果区内容到剪贴板（须先点过「优化」）"""
+        text = self.buf_res.get_text(self.buf_res.get_start_iter(),
+                                     self.buf_res.get_end_iter(), True).strip()
+        if not text or text.startswith("优化失败") or text == "优化中…":
+            self.lbl_status.set_text("还没有可复制的优化结果，先点「优化」。")
+            return
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+        self.lbl_status.set_text("已复制优化结果 %d 字" % len(text))
+
+    def on_key_press(self, w, ev):
+        """窗口内按 Esc → 关闭草稿并退出草稿模式（等同点 X）"""
+        if ev.keyval == 0xff1b:   # GDK_KEY_Escape
+            self.close_draft()
+            return True
+        return False
 
     # ── 优化：调 config.json 配置的大模型 ────────────────────
     def on_optimize(self, w):
@@ -213,17 +323,12 @@ class Draft:
         self.buf_res.set_text(result)
         self.optimized = not result.startswith("优化失败")
         if self.optimized:
-            # 优化成功：自动复制到剪贴板 + 提示 + 延迟自动关闭
-            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(result, -1)
-            self.lbl_status.set_text("已复制到剪贴板，即将自动关闭…")
-            GLib.timeout_add(1800, self._auto_close)
+            # 优化成功：结果留在下方结果区，窗口保持打开——用户自行「复制全部」或 Esc 关闭
+            # （不自动复制/自动关窗，避免打断连续整理多段语音的流程）
+            self.lbl_status.set_text("优化完成。复制结果请点上方「复制优化结果」，或直接编辑原文。")
         else:
             self.lbl_status.set_text("")
         return False   # idle 回调只执行一次
-
-    def _auto_close(self):
-        self.close_draft()
-        return False   # 只执行一次
 
 
 def main():

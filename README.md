@@ -20,7 +20,7 @@ flowchart LR
     S -->|"preedit / commit / done / started"| E
     S -->|"UDP 19527: rms/show/stop/polish"| O[OSD 浮窗 voiceime_osd.py<br/>GTK 声波动画]
     S -->|"UDP 19528: text/clear/show"| D[草稿窗 voiceime_draft.py<br/>GTK 文本暂存 + 优化按钮]
-    W[Web 配置台 voiceime_web.py<br/>127.0.0.1:19530] -->|"HTTP /api/config"| S
+    W[Web 配置台 voiceime_web.py<br/>127.0.0.1:19530<br/>配置 / 输入历史] -->|"HTTP /api/config · /api/history"| S
     E -->|"FcitxInstanceCommitString"| X[XIM 管线 → 当前应用]
 ```
 
@@ -31,7 +31,7 @@ flowchart LR
 | `voiceime-core` | `voice_ime_service.py` | Unix socket + UDP 19527/19528 + UDP 19529(草稿控制) | 主服务：录音/ASR/润色/上屏 |
 | `voiceime-osd` | `voiceime_osd.py` | UDP 19527 | 录音指示浮窗（声波动画，随润色状态变色） |
 | `voiceime-draft` | `voiceime_draft.py` | UDP 19528 | 草稿窗口（暂存 + 一键 LLM 优化） |
-| `voiceime-web` | `voiceime_web.py` | HTTP 127.0.0.1:19530 | Web 配置台（改配置/多模型/日志/重启） |
+| `voiceime-web` | `voiceime_web.py` | HTTP 127.0.0.1:19530 | Web 配置台（改配置/多模型/输入历史/日志/重启） |
 
 ## 目录结构
 
@@ -90,7 +90,9 @@ voice-ime/
 - 底部按钮：**【复制全部】**一键复制原文、【优化】LLM 润色（成功**不自动关窗、不自动复制**，可手改后再复制）、【复制优化结果】复制润色结果
 - **Esc** 关窗并退出草稿模式
 
-**Web 配置台**：浏览器开 `http://127.0.0.1:19530`——改 ASR/润色参数、管理多个 LLM 模型（下拉切换、增删、持久化保存）、看实时日志、一键重启。
+**Web 配置台**：浏览器开 `http://127.0.0.1:19530`。
+- **配置** tab：改 ASR/润色参数、管理多个 LLM 模型（下拉切换、增删、持久化保存）、看实时日志、一键重启。
+- **输入历史** tab：每句上屏即记录（`logs/voiceime-history.jsonl`），表格同时展示**识别原文**与**润色后上屏文本**、润色耗时/失败状态；搜索框对两者做模糊匹配（空格分词，全部命中，命中片段高亮），可切换 50/100/300 条与自动刷新。
 
 ## 配置（config.json）
 

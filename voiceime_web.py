@@ -26,6 +26,7 @@ LOGS = {
     "draft": "voiceime-draft.log",
     "engine": "voiceime-engine.log",
 }
+HISTORY = BASE / "logs" / "voiceime-history.jsonl"
 
 # 顶层允许键 + 类型约束（None = 任意 json 值）
 ALLOWED = {
@@ -154,6 +155,22 @@ def tail_log(name, n):
         return ""
 
 
+def tail_history(n):
+    """输入历史：core 每上屏一条追加一行 JSON。返回最新在前。"""
+    try:
+        lines = HISTORY.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    items = []
+    for line in lines[-n:]:
+        try:
+            items.append(json.loads(line))
+        except Exception:
+            continue
+    items.reverse()
+    return items
+
+
 def run_restart():
     r = subprocess.run(["systemctl", "--user", "restart", "voiceime-core"],
                        capture_output=True, text=True, timeout=60, env={
@@ -260,6 +277,35 @@ select option{background:var(--paper)}
 .log-box{background:var(--ink);border:2px solid var(--ink);color:#a7f0a0;
   font:11.5px/1.7 var(--mono);padding:12px 14px;height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all}
 .log-box.empty::after{content:"（暂无日志输出）";color:rgba(242,239,232,.45)}
+.tabs{display:flex;margin:0 0 24px;border-bottom:3px solid var(--ink);gap:8px}
+.tab{border:2px solid var(--ink);border-bottom:none;background:var(--paper2);color:var(--muted);
+  font:700 12.5px/1 var(--mono);padding:11px 18px;cursor:pointer;position:relative;top:3px;
+  display:inline-flex;align-items:center;gap:8px}
+.tab:hover{color:var(--ink)}
+.tab.on{background:var(--ink);color:var(--paper);box-shadow:3px -3px 0 var(--red)}
+.tab.on:hover{color:var(--paper)}
+.tab .cnt{padding:2px 6px;background:var(--red);color:var(--paper);font-size:10.5px;font-weight:700}
+.pane[hidden]{display:none!important}
+.hist-tools{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.hist-tools input[type=search]{flex:1;min-width:200px;border:2px solid var(--ink);background:var(--paper);
+  color:var(--ink);font:12.5px/1 var(--mono);padding:9px 11px}
+.hist-tools input[type=search]:focus{outline:3px solid var(--red);outline-offset:1px}
+.hist-wrap{max-height:540px;overflow:auto;border:2px solid var(--ink)}
+table.hist{width:100%;border-collapse:collapse;font:12.5px/1.6 var(--mono)}
+table.hist th{position:sticky;top:0;z-index:1;background:var(--ink);color:var(--paper);text-align:left;
+  padding:8px 10px;font:700 11.5px/1 var(--mono);letter-spacing:.04em}
+table.hist td{padding:8px 10px;border-bottom:1px solid rgba(23,20,18,.18);vertical-align:top;word-break:break-word}
+table.hist tr:hover td{background:var(--paper2)}
+table.hist td.t{white-space:nowrap;color:var(--muted);font-size:11.5px}
+table.hist td.o{color:var(--muted)}
+table.hist td.x{font-weight:700}
+table.hist td.s{white-space:nowrap;font-size:11px}
+.tagp,.tagn,.tage{display:inline-block;padding:2px 6px;border:1.5px solid;font-size:10.5px;font-weight:700}
+.tagp{color:var(--green);border-color:var(--green)}
+.tagn{color:var(--muted);border-color:var(--muted)}
+.tage{color:var(--red);border-color:var(--red)}
+table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
+.hist-empty{padding:30px;text-align:center;color:var(--muted);font:12px/1 var(--mono)}
 .bar{position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--paper);border-top:3px solid var(--ink)}
 .bar-in{max-width:980px;margin:0 auto;padding:11px 24px;display:flex;align-items:center;gap:10px}
 .bar .note{font:11px/1 var(--mono);color:var(--muted);margin-right:auto}
@@ -296,6 +342,13 @@ select option{background:var(--paper)}
       <span class="badge"><span class="dot" id="bdgEng"></span>引擎</span>
     </div>
   </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab on" data-tab="cfg" role="tab" aria-selected="true">配置</button>
+    <button class="tab" data-tab="hist" role="tab" aria-selected="false">输入历史<span class="cnt" id="histCnt">0</span></button>
+  </nav>
+
+  <div class="pane" id="pane-cfg">
 
   <section class="card">
     <div class="card-h"><h2>识别后端</h2><span class="hint">RESTART 生效</span></div>
@@ -396,6 +449,28 @@ select option{background:var(--paper)}
     <div class="log-box empty" id="logbox" tabindex="0" aria-label="日志内容"></div>
   </section>
 
+  </div><!-- /pane-cfg -->
+
+  <div class="pane" id="pane-hist" hidden>
+    <section class="card">
+      <div class="card-h"><h2>输入历史</h2><span class="hint" id="histMeta">…</span></div>
+      <p class="card-desc">每句上屏都会记录：识别原文与最终上屏（润色后）文本。搜索对两者做模糊匹配。</p>
+      <div class="hist-tools">
+        <input type="search" id="histQ" placeholder="搜索原文 / 润色后文本（空格分词，需全部命中）" aria-label="搜索输入历史">
+        <select id="histn" style="width:96px" aria-label="条数">
+          <option value="50">50 条</option><option value="100" selected>100 条</option><option value="300">300 条</option>
+        </select>
+        <button type="button" class="btn ghost" id="btnHistRefresh">刷新</button>
+        <span id="histMeta2" style="font:11px/1 var(--mono);color:var(--muted)"></span>
+      </div>
+      <div class="hist-wrap">
+        <table class="hist">
+          <thead><tr><th style="width:136px">时间</th><th>识别原文</th><th>上屏文本（润色后）</th><th style="width:96px">状态</th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
 </div>
 
 <div class="bar"><div class="bar-in">
@@ -625,6 +700,74 @@ async function doRollback(){
   window._filled = false; refreshState();
 }
 
+/* ── 输入历史（独立 tab）────────────────── */
+let histItems = [];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const histWords = q => q.trim().toLowerCase().split(" ").filter(Boolean);
+/* 模糊搜索命中高亮：按字符标记区间再拼接，避免二次替换破坏已插入的标签 */
+function hl(text, ws) {
+  if (!ws.length) return esc(text);
+  const low = text.toLowerCase(), marks = new Array(text.length).fill(false);
+  for (const w of ws) {
+    let i = 0;
+    while ((i = low.indexOf(w, i)) !== -1) {
+      for (let k = i; k < i + w.length && k < text.length; k++) marks[k] = true;
+      i += w.length;
+    }
+  }
+  let out = "", open = false;
+  for (let i = 0; i < text.length; i++) {
+    if (marks[i] !== open) { out += open ? "</mark>" : "<mark>"; open = marks[i]; }
+    out += esc(text[i]);
+  }
+  return open ? out + "</mark>" : out;
+}
+function renderHist() {
+  const ws = histWords($("histQ").value);
+  const rows = histItems.filter(it => !ws.length ||
+    ws.every(w => ((it.orig || "") + " " + (it.text || "")).toLowerCase().indexOf(w) !== -1));
+  $("histCnt").textContent = histItems.length;
+  $("histMeta").textContent = ws.length ? "匹配 " + rows.length + " / " + histItems.length + " 条"
+                                        : "最近 " + histItems.length + " 条";
+  const tb = $("histBody");
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="4" class="hist-empty">' +
+      (ws.length ? "没有匹配的记录" : "（还没有语音输入记录）") + "</td></tr>";
+    return;
+  }
+  tb.innerHTML = rows.map(it => {
+    const tag = it.fallback ? '<span class="tage">润色失败</span>'
+      : it.polished ? '<span class="tagp">润色 ' + it.ms + "ms</span>"
+      : '<span class="tagn">原文</span>';
+    const t = String(it.ts || "");
+    return "<tr>" +
+      '<td class="t" title="' + esc(t) + '">' + esc(t.slice(11) || t) + "</td>" +
+      '<td class="o">' + hl(it.orig || "", ws) + "</td>" +
+      '<td class="x">' + hl(it.text || "", ws) + "</td>" +
+      '<td class="s">' + tag + "</td></tr>";
+  }).join("");
+}
+async function loadHist() {
+  const r = await fetch("/api/history?n=" + $("histn").value)
+    .then(r => r.json()).catch(() => ({ items: [] }));
+  histItems = r.items || [];
+  $("histMeta2").textContent = "更新 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  renderHist();
+}
+function showTab(name) {
+  for (const el of document.querySelectorAll(".pane")) el.hidden = el.id !== "pane-" + name;
+  for (const b of document.querySelectorAll(".tab")) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  }
+  if (name === "hist") loadHist();
+}
+document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
+$("histQ").addEventListener("input", renderHist);
+$("histn").addEventListener("change", loadHist);
+$("btnHistRefresh").addEventListener("click", loadHist);
+
 /* ── 日志 ─────────────────────────────── */
 let atBottom = true;
 function scrollFollow(){ const b = $("logbox"); atBottom = b.scrollTop + b.clientHeight >= b.scrollHeight - 90; }
@@ -654,8 +797,9 @@ $("btnSave").addEventListener("click", () => save(false));
 $("btnSaveRestart").addEventListener("click", () => save(true));
 $("btnRollback").addEventListener("click", doRollback);
 
-refreshState(); loadLog();
+refreshState(); loadLog(); loadHist();
 setInterval(refreshState, 4000);
+setInterval(() => { if (!$("pane-hist").hidden) loadHist(); }, 6000);
 setInterval(loadLog, 6000);
 </script></body></html>
 """
@@ -689,6 +833,11 @@ class Handler(BaseHTTPRequestHandler):
                 name = (q.get("name") or ["service"])[0]
                 n = int((q.get("n") or ["100"])[0])
                 self._send(200, json.dumps({"log": tail_log(name, n)}))
+            elif self.path.startswith("/api/history"):
+                import urllib.parse
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                n = min(max(int((q.get("n") or ["100"])[0]), 1), 500)
+                self._send(200, json.dumps({"items": tail_history(n)}))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:

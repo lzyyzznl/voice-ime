@@ -33,6 +33,7 @@ import llm_polish
 
 SOCKET_PATH = "/tmp/voiceime-service.sock"
 LOG_PATH = str(Path(__file__).resolve().parent / "logs" / "voiceime-service.log")
+HISTORY_PATH = str(Path(__file__).resolve().parent / "logs" / "voiceime-history.jsonl")
 
 log = logging.getLogger("voiceime-service")
 
@@ -48,6 +49,23 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.FileHandler(LOG_PATH)],
     )
+
+_history_lock = threading.Lock()
+
+
+def record_history(orig, text, polished=False, fallback=False, ms=0):
+    """追加一条上屏记录（配置台「输入历史」页的数据源）。
+
+    一行一条 JSON，O_APPEND 原子写；文件只追加，读取方取尾部 N 行。
+    写失败不影响上屏。
+    """
+    rec = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "orig": orig, "text": text,
+           "polished": bool(polished), "fallback": bool(fallback), "ms": int(ms)}
+    try:
+        with _history_lock, open(HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("写输入历史失败: %s", e)
 
 
 # ── 录音：parec → 200ms 分片 → 路由到当前 ASR ──────────────
@@ -435,7 +453,7 @@ class VoiceIMEService:
         sents = [p.strip() for p in parts if p.strip()]
         return sents or ([text.strip()] if text.strip() else [])
 
-    def _send_commit(self, session, text, orig):
+    def _send_commit(self, session, text, orig, polished=False, fallback=False, ms=0):
         """上屏一条文本，并把原文按语义句记入润色上下文。
 
         上下文按"句"裁剪（最多 CONTEXT_N 句），不是按 ASR 定稿条数：
@@ -445,6 +463,7 @@ class VoiceIMEService:
         session.send({"type": "commit", "text": text})
         session.recent.extend(self._split_sentences(orig))
         del session.recent[:-llm_polish.CONTEXT_N]
+        record_history(orig, text, polished=polished, fallback=fallback, ms=ms)
 
     def _polish_loop(self, session):
         """会话串行润色线程：逐条取队列 → 润色（若标记）→ 上屏。
@@ -453,6 +472,9 @@ class VoiceIMEService:
         消除 0.3-2s 的候选栏空白（用户说完话立即能看到自己说的内容）。"""
         while True:
             text, polish = session.polish_q.get()
+            out = text
+            polished = fallback = False
+            ms = 0
             if polish:
                 session.send({"type": "preedit", "text": text})   # 先显示原文，别让候选栏空着
                 self._osd_send({"type": "polish", "state": "on"})          # P5: 声波变橙（润色中）
@@ -463,16 +485,18 @@ class VoiceIMEService:
                         ctx = list(session.recent[-llm_polish.CONTEXT_N:])
                         t0 = time.time()
                         out = llm_polish.polish(cfg, text, ctx)
+                        ms = int((time.time() - t0) * 1000)
+                        polished = True
                         log.info("润色 %.2fs: %r -> %r", time.time() - t0, text, out)
                 except Exception as e:
                     log.warning("润色失败，提交原文: %s", e)
                     self._osd_send({"type": "polish", "state": "fail"})    # P3: 声波变红（润色失败）
                     out = text
+                    fallback = True
                 else:
                     self._osd_send({"type": "polish", "state": "off"})     # 润色成功，恢复
-            else:
-                out = text
-            self._send_commit(session, out, orig=text)
+            self._send_commit(session, out, orig=text, polished=polished,
+                              fallback=fallback, ms=ms)
             session.send({"type": "preedit", "text": ""})   # commit 已上屏，清空候选栏
             with session.lock:
                 session.polish_outstanding -= 1

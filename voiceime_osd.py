@@ -163,7 +163,15 @@ class OSD:
         self.win.hide()
 
     def on_draw(self, widget, cr):
-        # 以窗口实际分配尺寸绘制（resize 有个异步生效过程，self.w/h 仅用于逻辑）
+        # 声波条只表示录音模式：青蓝=持续输入 A，橙=即停 B（松手即上屏）
+        # 润色状态改用卡片描边提示，不改变声波主色：黄=润色中，红=失败（1.5 秒后恢复）
+        bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
+        if self.polish_state == "fail":
+            edge_color = (1.0, 0.25, 0.25, 0.95)
+        elif self.polish_state == "on":
+            edge_color = (1.0, 0.85, 0.25, 0.95)
+        else:
+            edge_color = bar_color
         aw, ah = widget.get_allocated_width(), widget.get_allocated_height()
         if aw < 2 or ah < 2:
             aw, ah = self.w, self.h
@@ -177,28 +185,21 @@ class OSD:
         rounded_rect(cr, 4.5, 5, aw - 9, ah - 9, 16)
         cr.set_source_rgba(0, 0, 0, 0.28)
         cr.fill()
-        # 2. 绿色外发光（外扩半透明描边）→ 深色背景下的光晕
+        # 2. 外发光（外扩半透明描边）→ 深色背景下的光晕，跟随当前状态色
         rounded_rect(cr, 0.5, 0.5, aw - 1, ah - 1, 19)
-        cr.set_source_rgba(FG[0], FG[1], FG[2], 0.30)
+        cr.set_source_rgba(edge_color[0], edge_color[1], edge_color[2], 0.30)
         cr.set_line_width(3.0)
         cr.stroke()
         # 3. 圆角半透明卡片
         rounded_rect(cr, 3, 3, aw - 6, ah - 6, 16)
         cr.set_source_rgba(*BG)
         cr.fill()
-        # 亮青描边（卡片轮廓，深/浅背景均醒目）
+        # 圆角卡片描边：润色中变黄、失败变红，其余跟随模式色
         rounded_rect(cr, 3.5, 3.5, aw - 7, ah - 7, 15)
-        cr.set_source_rgba(FG[0], FG[1], FG[2], 0.9)
+        cr.set_source_rgba(*edge_color)
         cr.set_line_width(1.2)
         cr.stroke()
-        # 声波条：高度随 RMS，轻微相位差 → 波纹效果；颜色随录音模式/润色状态
-        # （持续输入=亮绿/青蓝，即停=橙色；润色中=亮黄提示等待，失败=红提示回落原文）
-        if self.polish_state == "fail":
-            bar_color = (1.0, 0.25, 0.25, 1.0)        # 润色失败：红
-        elif self.polish_state == "on":
-            bar_color = (1.0, 0.85, 0.25, 1.0)        # 润色中：亮黄
-        else:
-            bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
+        # 声波条：高度随 RMS，轻微相位差 → 波纹效果
         rms = self.display_rms
         base = BAR_MIN_H + min(rms / 300.0, 1.0) * (BAR_MAX_H - BAR_MIN_H) * 0.75
         cy = ah / 2

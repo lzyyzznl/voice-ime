@@ -109,18 +109,31 @@ static boolean connect_service(VoiceIM* im)
         return false;
     }
     im->sock = fd;
+    /* 发送超时 500ms：服务端（client_loop）不读时 write() 最多等 0.5s 返回
+       EWOULDBLOCK，绝不无限阻塞 fcitx 主线程（send_cmd 全部在主线程执行） */
+    struct timeval snd_tv;
+    snd_tv.tv_sec = 0;
+    snd_tv.tv_usec = 500000;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
     dbg_log("connect_service: 已连接 fd=%d", fd);
     return true;
 }
 
-static void restart_recv(VoiceIM* im)
+/* 安全停掉旧接收线程后再重连。Linux 上 close() 不会唤醒另一线程阻塞中的
+   read()，若随后 connect 复用了同一 fd 号，旧线程会读到新连接而永不退出，
+   g_thread_join 永久卡死 fcitx 主循环。必须先 shutdown(SHUT_RDWR) 唤醒
+   read（read 返回 0/错误）→ join（有界）→ 再 close、再重连。 */
+static void stop_recv_then_close(VoiceIM* im, int fd)
 {
+    im->recv_running = FALSE;
+    if (fd >= 0)
+        shutdown(fd, SHUT_RDWR);      /* 唤醒旧线程的阻塞 read */
     if (im->recv_thread) {
-        g_thread_join(im->recv_thread);  /* 旧线程读旧 fd，close 后返回 EOF 退出 */
+        g_thread_join(im->recv_thread);   /* 此刻 read 必已返回，有界 */
         im->recv_thread = NULL;
     }
-    im->recv_running = TRUE;
-    im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
+    if (fd >= 0)
+        close(fd);
 }
 
 static void send_cmd(VoiceIM* im, const char* json)
@@ -130,15 +143,21 @@ static void send_cmd(VoiceIM* im, const char* json)
         connect_service(im);   /* 未连接/已断开：先重连（unix socket 快速失败） */
     if (im->sock >= 0) {
         ssize_t n = write(im->sock, json, strlen(json));
-        if (n >= 0)
-            write(im->sock, "\n", 1);
-        if (n < 0) { /* 断开，重连并重启接收线程 */
-            close(im->sock);
+        if (n < 0 && errno == EINTR)
+            n = write(im->sock, json, strlen(json));
+        if (n >= 0) {
+            n = write(im->sock, "\n", 1);
+            if (n < 0 && errno == EINTR)
+                write(im->sock, "\n", 1);
+        }
+        if (n < 0) { /* 断开或发送超时：安全停旧线程后重连 */
+            stop_recv_then_close(im, im->sock);
             im->sock = -1;
-            if (connect_service(im)) {
+            if (connect_service(im)) {   /* 复用 fd 号时旧线程已结束，无竞态 */
                 write(im->sock, json, strlen(json));
                 write(im->sock, "\n", 1);
-                restart_recv(im);
+                im->recv_running = TRUE;
+                im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
             }
         }
     }
@@ -395,6 +414,7 @@ static void* recv_loop(void* arg)
             }
         }
     }
+    im->recv_running = FALSE;   /* 线程退出（EOF/错误/被 shutdown 唤醒）时清扫标志 */
     return NULL;
 }
 
@@ -626,6 +646,7 @@ static void VoiceIMDestroy(void* arg)
     send_im_active(im, 0);
     im->recv_running = FALSE;
     if (im->sock >= 0) {
+        shutdown(im->sock, SHUT_RDWR);   /* 先唤醒阻塞 read 再 join，防销毁时卡死 */
         close(im->sock);
         im->sock = -1;
     }

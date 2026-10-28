@@ -27,7 +27,6 @@ command -v parec >/dev/null 2>&1        || MISSING="$MISSING pulseaudio-utils"
 command -v paplay >/dev/null 2>&1       || MISSING="$MISSING pulseaudio-utils"
 [ -f /usr/include/fcitx/fcitx.h ]       || MISSING="$MISSING fcitx-devel"
 pkg-config --exists glib-2.0 2>/dev/null || MISSING="$MISSING glib2-devel"
-pkg-config --exists gtk+-3.0 2>/dev/null || MISSING="$MISSING gtk3"
 # core/web 用 python3.11（本仓库环境）；找不到时降级探测 python3
 PY311=""
 for c in "$HOME/.local/bin/python3" python3; do
@@ -45,7 +44,9 @@ fi
 if [ ! -x /usr/bin/python3.6 ]; then
     MISSING="$MISSING python3.6"
 else
-    /usr/bin/python3.6 -c "import gi" >/dev/null 2>&1 || MISSING="$MISSING python3-gobject"
+    # 运行时只需要 python3-gobject + GTK3 库，不需要 gtk3-devel
+    /usr/bin/python3.6 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk" >/dev/null 2>&1 \
+        || MISSING="$MISSING python3-gobject"
     /usr/bin/python3.6 -c "import cairo" >/dev/null 2>&1 || MISSING="$MISSING python36-cairo"
 fi
 
@@ -62,7 +63,6 @@ if [ -n "$MISSING" ]; then
             pulseaudio-utils) PKGS="$PKGS pulseaudio-utils";;
             fcitx-devel) PKGS="$PKGS fcitx-devel";;
             glib2-devel) PKGS="$PKGS glib2-devel";;
-            gtk3) PKGS="$PKGS gtk3";;
             python3-gobject) PKGS="$PKGS python3-gobject";;
             python36-cairo) PKGS="$PKGS python36-cairo";;
         esac
@@ -184,14 +184,50 @@ ACTIVE=$(systemctl --user is-active voiceime-core voiceime-osd voiceime-draft vo
 echo "服务状态: $ACTIVE"
 
 echo ""
+echo "== 8. 迁移 fcitx 配置并重启 =="
+# 语音插件不占输入法位：旧版本注册的 voiceime 输入法条目必须移除，
+# 否则 fcitx 会把它当默认 IM —— 语音和拼音都不工作。
+# fcitx 退出时会把内存里的旧 profile 写回，所以必须先让它彻底退出再改。
+pkill -x fcitx 2>/dev/null && sleep 1 || true
+pkill -9 -x fcitx 2>/dev/null || true   # 确保不写回旧 profile
+PROFILE="${XDG_CONFIG_HOME:-$HOME/.config}/fcitx/profile"
+if [ -f "$PROFILE" ] && grep -q '^EnabledIMList=.*voiceime' "$PROFILE"; then
+    cp "$PROFILE" "$PROFILE.bak_voiceime_addon"
+    "$PY311" - "$PROFILE" <<'PY'
+import re
+import sys
+
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+m = re.search(r"^EnabledIMList=(.*)$", s, re.M)
+items = m.group(1).split(",")
+kept = [i for i in items if not i.startswith("voiceime:")]
+s = s[: m.start(1)] + ",".join(kept) + s[m.end(1):]
+first = next((i[:-5] for i in kept if i.endswith(":True")), None)
+if first:
+    s = re.sub(r"^IMName=.*$", "IMName=" + first, s, flags=re.M)
+open(p, "w", encoding="utf-8").write(s)
+PY
+    echo "已从输入法列表移除 voiceime（备份 $PROFILE.bak_voiceime_addon）"
+else
+    echo "输入法列表无需迁移"
+fi
+export DISPLAY="${DISPLAY:-:0}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+setsid fcitx -d >/dev/null 2>&1 || true
+sleep 2
+if pgrep -x fcitx >/dev/null 2>&1; then
+    echo "fcitx 已重启 ✓（插件随启动加载，日志见 logs/voiceime-engine.log）"
+else
+    echo "⚠ fcitx 未能启动：检查 DISPLAY=$DISPLAY 后手动执行 setsid fcitx -d"
+fi
+
+echo ""
 echo "======================================"
-echo "安装完成。最后一步："
-echo "  1. 重启 fcitx 使新引擎生效（.so 只在启动时加载）："
-echo "       pkill fcitx && sleep 2"
-echo "       export DISPLAY=${DISPLAY:-:0} DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$(id -u)/bus\""
-echo "       setsid fcitx -d"
-echo "  2. 填好 config.json 凭证（豆包 doubao.api_key / llm models）"
-echo "  3. 输入法保持拼音（搜狗）激活（fcitx-remote 返回 2）；长按 Ctrl+Alt 说话（语音与拼音并存，无需切输入法）"
+echo "安装完成："
+echo "  1. 填好 config.json 凭证（豆包 doubao.api_key / llm models），然后 ./service.sh restart"
+echo "  2. 拼音直接打字；长按 Ctrl+Alt 说话 —— 两者并存，无需切换输入法"
+echo "  3. fcitx 须处于激活态：fcitx-remote 返回 2（Ctrl+Space 切换）"
 echo ""
 echo "环境复查: ./check_env.sh"
 echo "服务管理: systemctl --user status voiceime-core  |  ./service.sh restart"

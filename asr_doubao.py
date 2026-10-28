@@ -59,6 +59,8 @@ class DoubaoASR:
         self.request_overrides = request or {}   # config.doubao.request 覆盖默认参数
         self.ws = None
         self.finals = []                 # 定稿句文本（按序）
+        self._nostream = "nostream" in url   # 单向流式：整句结果随 result.text 一次返回
+        self._nostream_text = ""             # nostream 已识别文本（避免反复提交同一句）
         self._seq = 1
         self._on_interim = None
         self._on_final = None
@@ -149,7 +151,7 @@ class DoubaoASR:
                     log.error("%s", self._error)
                     self._completed.set()
                     break
-                self._handle(obj)
+                self._handle(obj, is_last=bool(flags & 0b0010 or obj.get("is_last_package")))
                 if flags & 0b0010 or obj.get("is_last_package"):   # is_last_package
                     self._completed.set()
                     break
@@ -161,7 +163,7 @@ class DoubaoASR:
                     log.error("%s", self._error)
             self._completed.set()
 
-    def _handle(self, obj):
+    def _handle(self, obj, is_last=False):
         pm = obj.get("payload_msg")
         if not isinstance(pm, dict):
             pm = obj
@@ -188,6 +190,22 @@ class DoubaoASR:
                     self.finals.append(t)
                     if self._on_final:
                         self._on_final({"text": t})
+        # nostream：无 utterance，整句结果随 result.text 一次返回。末包到达即视为
+        # 定稿提交（此前各帧 result.text 为累计中间值，只作 preedit 预览，不提交），
+        # 避免"识别了却不上屏"（老 bug：识别文本只走 interim，从不 commit）
+        if self._nostream and not utts:
+            text = (r.get("text") or "").strip()
+            # 末包 → 提交定稿；否则仅预览（same 文本去重，防每帧重复 on_interim）
+            if is_last and text and text != self._nostream_text:
+                self._nostream_text = text
+                self.finals.append(text)
+                if self._on_final:
+                    self._on_final({"text": text})
+            elif not is_last and text and text != self._last_interim:
+                self._last_interim = text
+                if self._on_interim:
+                    self._on_interim({"text": text})
+            return
         # interim：最后一句未定稿内容（已定稿句上屏后 preedit 只显示"正在说"的部分）
         live = [u["text"].strip() for u in utts
                 if not u.get("definite") and u.get("text", "").strip()]

@@ -57,7 +57,77 @@ static boolean is_shift(FcitxKeySym sym)
     return sym == FcitxKey_Shift_L || sym == FcitxKey_Shift_R;
 }
 
-typedef struct _VoiceIM {
+typedef struct _VoiceIM VoiceIM;   /* 组合判定助手需要，结构体定义在后 */
+
+/* ── 可配置触发组合：字符串形如 "ctrl+alt" / "ctrl+alt+space" ── */
+#define MOD_CTRL  1
+#define MOD_ALT   2
+#define MOD_SHIFT 4
+
+static boolean is_modifier(FcitxKeySym sym)
+{
+    return is_ctrl(sym) || is_alt(sym) || is_shift(sym);
+}
+
+/* 键名 → KeySym。只覆盖手柄常用键：字母数字、space/tab/esc/grave。未知返回 0。 */
+static FcitxKeySym key_from_name(const char* s)
+{
+    if (!s || !s[0] || s[1])
+        return s && s[0] == '`' ? FcitxKey_grave : 0;
+    if (s[0] >= 'A' && s[0] <= 'Z')
+        return (FcitxKeySym)(s[0] - 'A' + 'a');
+    if ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))
+        return (FcitxKeySym)s[0];
+    return 0;
+}
+
+/* 解析 "ctrl+alt+space"：修饰键进 mods，唯一的普通键进 key。
+   返回 FALSE 表示格式非法，调用方保留原配置。 */
+static boolean parse_combo(const char* s, int* mods, FcitxKeySym* key)
+{
+    char buf[64];
+    int m = 0;
+    FcitxKeySym k = 0;
+    size_t len;
+
+    if (!s || !s[0] || (len = strlen(s)) >= sizeof(buf))
+        return false;
+    memcpy(buf, s, len + 1);
+
+    char* p = buf;
+    while (p && *p) {
+        char* sep = strchr(p, '+');
+        if (sep)
+            *sep = '\0';
+        if (!strcmp(p, "ctrl")) {
+            m |= MOD_CTRL;
+        } else if (!strcmp(p, "alt")) {
+            m |= MOD_ALT;
+        } else if (!strcmp(p, "shift")) {
+            m |= MOD_SHIFT;
+        } else if (!strcmp(p, "space")) {
+            k = FcitxKey_space;
+        } else if (!strcmp(p, "tab")) {
+            k = FcitxKey_Tab;
+        } else if (!strcmp(p, "esc") || !strcmp(p, "escape")) {
+            k = FcitxKey_Escape;
+        } else {
+            FcitxKeySym sym = key_from_name(p);
+            if (!sym)
+                return false;
+            k = sym;
+        }
+        p = sep ? sep + 1 : NULL;
+    }
+    if (!m && !k)
+        return false;
+    *mods = m;
+    *key = k;
+    return true;
+}
+
+
+struct _VoiceIM {
     FcitxInstance* owner;
     int sock;                       /* 到语音服务的 socket */
     pthread_mutex_t send_lock;
@@ -73,12 +143,45 @@ typedef struct _VoiceIM {
     boolean esc_pressed;            /* Escape 按下状态（防 repeat） */
     boolean tri_pressed;            /* Ctrl+Alt+Shift 三键齐按过（空闲松手切草稿） */
     int hold_ms;                    /* 长按触发阈值（服务端 config 下发） */
+    /* 可配置触发组合（服务端 config 下发）：mods 位掩码 + 可选普通键 */
+    int ptt_mods;                   /* 按住说话（对讲机）组合的修饰键 */
+    FcitxKeySym ptt_key;            /* 0 = 纯修饰键组合 */
+    int hold_mods;                  /* 按住持续对话（持续模式）组合 */
+    FcitxKeySym hold_key;
+    FcitxKeySym active_key;         /* 当前按住的普通键，组合判定用 */
+    boolean armed_hold;             /* 本次 armed 的目标模式：true=持续 A */
     struct timespec press_time;     /* Ctrl+Alt 同时按下的时刻 */
     volatile gboolean recv_running;
     GThread* recv_thread;
     GAsyncQueue* queue;             /* recv_thread → 主循环 消息队列（线程安全） */
     FcitxInputContext* last_ic;     /* 上一轮轮询的焦点上下文（检测失焦，替代 IM OnClose） */
-} VoiceIM;
+};
+static int im_mods(VoiceIM* im)
+{
+    int m = 0;
+    if (im->ctrl_down)  m |= MOD_CTRL;
+    if (im->alt_down)   m |= MOD_ALT;
+    if (im->shift_down) m |= MOD_SHIFT;
+    return m;
+}
+
+/* press 判定（严格）：按下的键必须属于组合。纯修饰组合要求修饰键恰好齐全，
+   含普通键的组合允许额外修饰键（避免 Ctrl+Alt+Space 与 Ctrl+Alt+Shift+Space 互斥）。 */
+static boolean combo_match(VoiceIM* im, int mods, FcitxKeySym key, FcitxKeySym sym)
+{
+    int m = im_mods(im);
+    if (key == 0)
+        return is_modifier(sym) && m == mods;
+    return sym == key && (m & mods) == mods;
+}
+
+/* release 判定（宽松）：组合是否仍按住。额外修饰键不影响，避免松开无关键误停。 */
+static boolean combo_held(VoiceIM* im, int mods, FcitxKeySym key)
+{
+    if ((im_mods(im) & mods) != mods)
+        return false;
+    return key == 0 || im->active_key == key;
+}
 
 static VoiceIM* g_voiceim = NULL;   /* fcitx 单实例 */
 
@@ -89,6 +192,25 @@ static void toggle_rec_mode(VoiceIM* im);  /* 前向声明（DoReleaseInput 使�
 static void toggle_draft(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void stop_and_submit(VoiceIM* im);  /* 前向声明（DoInput 使用） */
 static void stop_recording_on_lost_focus(VoiceIM* im);  /* 前向声明（poll_queue_cb 使用） */
+
+/* 组合键按下后进入 armed，等待主循环判定 hold_ms。
+   hold（持续对话）优先于 ptt（按住说话）：当前者是后者的扩展组合
+   （如 ctrl+alt+space 之于 ctrl+alt）时，先按修饰键只是预兆，
+   按下扩展普通键即升级为持续模式。 */
+static void arm_review_combo(VoiceIM* im, FcitxKeySym sym)
+{
+    if (im->triggered)
+        return;
+    if (combo_match(im, im->hold_mods, im->hold_key, sym)) {
+        im->armed = true;
+        im->armed_hold = true;
+        clock_gettime(CLOCK_MONOTONIC, &im->press_time);
+    } else if (combo_match(im, im->ptt_mods, im->ptt_key, sym)) {
+        im->armed = true;
+        im->armed_hold = false;
+        clock_gettime(CLOCK_MONOTONIC, &im->press_time);
+    }
+}
 
 /* ─────────────────────────── IPC ─────────────────────────── */
 
@@ -252,7 +374,8 @@ static void poll_queue_cb(void* data)
         }
     }
 
-    /* 长按 Ctrl+Alt ≥500ms → 切换录音（主循环线程，可安全调 UI） */
+    /* 长按 ≥hold_ms → 开始录音（主循环线程，可安全调 UI）。
+       模式由命中的组合决定：按住说话 → 对讲机 B；按住持续对话 → 持续 A。 */
     if (im->armed && !im->triggered) {
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -265,8 +388,7 @@ static void poll_queue_cb(void* data)
             im->shift_solo = false; /* 同上：不误切录音模式 */
             if (!im->recording) {
                 im->recording = true;
-                /* 模式保持用户当前选择（默认对讲机 B；Ctrl+Tab 可切持续 A），
-                   不再每次强制持续模式 */
+                im->mode_b = !im->armed_hold;   /* hold 组合 → 持续 A，否则对讲机 B */
                 send_cmd(im, im->mode_b
                               ? "{\"cmd\":\"mode\",\"b\":1}"
                               : "{\"cmd\":\"mode\",\"b\":0}");
@@ -355,6 +477,31 @@ static void dbg_log(const char* fmt, ...)
     va_end(ap);
 }
 
+/* 从 config 行里取 "name": "value" 的字符串值；找不到或超长返回 NULL。 */
+static const char* json_str_field(const char* line, const char* name, char* out, size_t cap)
+{
+    char pat[48];
+    snprintf(pat, sizeof(pat), "\"%s\"", name);
+    const char* p = strstr(line, pat);
+    if (!p)
+        return NULL;
+    p = strchr(p + strlen(pat), ':');
+    if (!p)
+        return NULL;
+    p = strchr(p, '"');
+    if (!p)
+        return NULL;
+    const char* q = strchr(p + 1, '"');
+    if (!q)
+        return NULL;
+    size_t n = (size_t)(q - p - 1);
+    if (n >= cap)
+        return NULL;
+    memcpy(out, p + 1, n);
+    out[n] = '\0';
+    return out;
+}
+
 
 /* ─────────────────── 接收线程 ────────────────────────────── */
 
@@ -399,13 +546,38 @@ static void* recv_loop(void* arg)
                        引擎必须在主循环复位 recording，否则无法重新开始 */
                     schedule_msg(im, 3, NULL);
                 } else if (strstr(line, "\"config\"")) {
-                    /* 服务端下发配置：hold_ms 长按触发阈值 */
+                    /* 服务端下发配置：hold_ms 长按阈值 + 两个触发组合 */
                     const char* p = strstr(line, "\"hold_ms\"");
                     if (p && (p = strchr(p, ':')) != NULL) {
                         int v = atoi(p + 1);
                         if (v >= 100 && v <= 3000) {
                             im->hold_ms = v;
                             dbg_log("收到 config: hold_ms=%d", im->hold_ms);
+                        }
+                    }
+                    char vb1[64], vb2[64];
+                    const char* ptt = json_str_field(line, "ptt_keys", vb1, sizeof(vb1));
+                    if (ptt) {
+                        int m = 0;
+                        FcitxKeySym k = 0;
+                        if (parse_combo(ptt, &m, &k)) {
+                            im->ptt_mods = m;
+                            im->ptt_key = k;
+                            dbg_log("收到 config: ptt_keys=%s", ptt);
+                        } else {
+                            dbg_log("config: ptt_keys 非法，保留原值: %s", ptt);
+                        }
+                    }
+                    const char* hold = json_str_field(line, "hold_keys", vb2, sizeof(vb2));
+                    if (hold) {
+                        int m = 0;
+                        FcitxKeySym k = 0;
+                        if (parse_combo(hold, &m, &k)) {
+                            im->hold_mods = m;
+                            im->hold_key = k;
+                            dbg_log("收到 config: hold_keys=%s", hold);
+                        } else {
+                            dbg_log("config: hold_keys 非法，保留原值: %s", hold);
                         }
                     }
                 }
@@ -449,33 +621,41 @@ static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
     if (is_ctrl(sym)) {
         im->ctrl_down = true;
         im->ctrl_solo = true;        /* 单独按下；若期间按了其他键会被上方取消 */
-        /* Ctrl+Alt（无 Shift）→ armed 等待 hold_ms 判定；
-           Ctrl+Alt+Shift → 三键切草稿，不触发录音 */
-        if (im->alt_down && !im->shift_down && !im->triggered) {
-            im->armed = true;
-            clock_gettime(CLOCK_MONOTONIC, &im->press_time);
-        }
+        arm_review_combo(im, sym);
         return false;                /* 修饰键透传：应用仍收到 Ctrl 按下 */
     }
     if (is_alt(sym)) {
         im->alt_down = true;
-        if (im->ctrl_down && !im->shift_down && !im->triggered) {
-            im->armed = true;
-            clock_gettime(CLOCK_MONOTONIC, &im->press_time);
-        }
+        arm_review_combo(im, sym);
         return false;
     }
     if (is_shift(sym)) {
         im->shift_down = true;
         im->shift_solo = true;
-        /* Ctrl+Alt+Shift 三键齐按：空闲时切草稿（松手触发）。取消 armed 防误启录音 */
-        if (im->ctrl_down && im->alt_down) {
+        /* 按住说话组合 + Shift 三键齐按：空闲时切草稿（松手触发）。
+           组合本身已含 Shift 时不存在三键语义，直接走正常 arm。 */
+        if (im->ptt_key == 0 && !(im->ptt_mods & MOD_SHIFT)
+            && im_mods(im) == (im->ptt_mods | MOD_SHIFT)) {
             im->tri_pressed = true;
             im->armed = false;
             im->triggered = true;    /* 防 repeat：三键松手前不再误触发录音 */
             dbg_log("三键齐按：待松手切草稿");
+        } else {
+            arm_review_combo(im, sym);
         }
         return false;
+    }
+    /* 普通键：命中组合才记录 active_key（避免无关按键干扰组合判定），
+       并在组合已生效时消费该键——否则按住说话时这个键（空格等）的
+       自动重复会被打进当前输入框。组合未按满则透传，不影响正常打字。 */
+    if (sym == im->ptt_key || sym == im->hold_key)
+        im->active_key = sym;
+    arm_review_combo(im, sym);
+    if (combo_match(im, im->hold_mods, im->hold_key, sym)
+        || combo_match(im, im->ptt_mods, im->ptt_key, sym)
+        || (im->recording && (sym == im->ptt_key || sym == im->hold_key))) {
+        *retval = IRV_DO_NOTHING;
+        return true;
     }
 
     /* Ctrl+Alt+Tab（无 Shift）→ 切换录音模式 A/B。
@@ -524,25 +704,23 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
     dbg_log("filter release sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
+    /* 松开普通键：清 active_key，供组合是否仍按住的判定 */
+    if (!is_modifier(sym) && im->active_key == sym)
+        im->active_key = 0;
+
     if (is_ctrl(sym)) {
         /* A 持续模式录音中单独按 Ctrl 并释放 → 切草稿（对讲机 B 录音时 Ctrl 是触发
            键且 ctrl_solo 已在触发时清除，不会误切） */
         if (im->ctrl_solo && im->recording && !im->mode_b)
             toggle_draft(im);
-        /* 对讲机 B：松开触发键之一即停止提交（按住=说，松开=停） */
-        if (im->mode_b && im->triggered && im->recording)
-            stop_and_submit(im);
         im->ctrl_down = false;
         im->ctrl_solo = false;
     }
     else if (is_alt(sym)) {
-        /* 对讲机 B：松开触发键之一即停止提交 */
-        if (im->mode_b && im->triggered && im->recording)
-            stop_and_submit(im);
         im->alt_down = false;
     }
     else if (is_shift(sym)) {
-        /* Ctrl+Alt+Shift 三键齐按后松开 Shift → 空闲切草稿（对讲机模式入口） */
+        /* 按住说话组合 + Shift 三键齐按后松开 Shift → 空闲切草稿 */
         if (im->tri_pressed) {
             im->tri_pressed = false;
             dbg_log("三键松手：切换草稿模式");
@@ -554,12 +732,18 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
     else if (sym == FcitxKey_Escape)
         im->esc_pressed = false;
 
-    /* 两键全部释放：重置长按判定状态。
+    /* 对讲机 B：按住说话组合被松开即停止提交（按住=说，松开=停） */
+    if (im->mode_b && im->triggered && im->recording
+        && !combo_held(im, im->ptt_mods, im->ptt_key))
+        stop_and_submit(im);
+
+    /* 两个组合都已松开：重置长按判定状态。
        未触发（<hold_ms 松开）→ 本次作废，不算误触；已触发 → 允许下次再触发 */
-    if (!im->ctrl_down && !im->alt_down) {
+    if (!combo_held(im, im->ptt_mods, im->ptt_key)
+        && !combo_held(im, im->hold_mods, im->hold_key)) {
         im->armed = false;
         im->triggered = false;
-        im->tri_pressed = false;   /* 三键未完成（先松了 Ctrl/Alt）也清，防悬挂 */
+        im->tri_pressed = false;   /* 组合未完成（先松了修饰键）也清，防悬挂 */
     }
     return false;
 }
@@ -618,6 +802,12 @@ static void* VoiceIMCreate(FcitxInstance* instance)
     im->recording = false;
     im->mode_b = true;       /* 默认对讲机 B（按住说松开停） */
     im->hold_ms = HOLD_MS_DEFAULT;
+    /* 默认快捷键：按住 Ctrl+Alt 说话（对讲机）；按住 Ctrl+Alt+Space 持续对话。
+       服务端 config 下发 ptt_keys / hold_keys 时覆盖。 */
+    im->ptt_mods = MOD_CTRL | MOD_ALT;
+    im->ptt_key = 0;
+    im->hold_mods = MOD_CTRL | MOD_ALT;
+    im->hold_key = FcitxKey_space;
     im->queue = g_async_queue_new();
     g_voiceim = im;
 

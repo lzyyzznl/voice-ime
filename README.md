@@ -5,6 +5,8 @@
 在 ZTE 内网环境下，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
 **默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**——不碰剪贴板，一句话说完松手即可。
 
+> 快捷键可改：**按住说话** 与 **按住持续对话** 两组组合在配置台「快捷键」卡片里设置（`ptt_keys` / `hold_keys`）。
+
 它是 fcitx 4 的 **Module addon**（注册全局按键过滤器），**不占输入法位**：拼音输入法（搜狗）可常驻激活，打字和说话随时切换、不用切输入法。
 
 ## 架构
@@ -71,6 +73,8 @@ voice-ime/
 | **单独按 Ctrl** | A 持续录音中：切草稿窗（再按切回） |
 | **Ctrl+Alt+Shift 三键** | B 对讲机空闲时：切草稿窗 |
 
+> **快捷键可自定义**：`ptt_keys`（按住说话）与 `hold_keys`（按住持续对话）默认 `ctrl+alt` / `ctrl+alt+space`，在配置台「快捷键」卡片改，保存并重启后生效。下表其余按键（Tab 切模式、Esc、Ctrl/Shift 草稿入口）固定。
+
 1. 保持拼音输入法（搜狗）激活即可；`fcitx-remote` 返回 `2` 表示 fcitx 已激活（否则按 Ctrl+Space 激活）
 2. 聚焦目标输入框
 3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停上屏；或 **Ctrl+Alt+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
@@ -111,10 +115,14 @@ voice-ime/
 | `osd.*` | 浮窗宽高/垂直位置 |
 | `focus_lost_stop` | 失焦自动停录释放麦克风 |
 | `hold_ms` | 长按阈值 ms（300） |
+| `ptt_keys` | **按住说话**（对讲机）快捷键，默认 `ctrl+alt`；写法见下 |
+| `hold_keys` | **按住持续对话**快捷键，默认 `ctrl+alt+space`；触发后可松手继续说，Esc 停止 |
 | `llm.active` | 当前生效模型 id（对应 models[].id） |
 | `llm.models[]` | 多模型列表：`{id, name, endpoint, api_key, model, system_prompt}`，配置台可视化管理 |
 | `llm.auto_polish` | 每句上屏前 LLM 润色开关 |
 | `llm.models[].system_prompt` | 润色提示词：明示「上文/待润色」边界 + 分条规则（详见 example） |
+
+**快捷键写法**：修饰键 `ctrl` / `alt` / `shift` 用 `+` 连接，末尾可加**一个**普通键（`space`、`tab`、`esc`、单个字母数字或 `` ` ``）。例：`ctrl+alt`、`ctrl+shift`、`alt+space`、`ctrl+alt+d`。两个组合不能相同；`hold_keys` 可以以 `ptt_keys` 开头（按下末尾那个键即从对讲机升级为持续模式）。配置台「快捷键」卡片可直接改，保存并重启生效；改后重启 fcitx 才会重新下发到引擎。
 
 **api_key 三种写法**：`sk-` 开头真实密钥 / UUID（内网网关）/ 恰好等于已设环境变量名（从环境读）。
 

@@ -35,8 +35,34 @@ ALLOWED = {
     "sample_rate": int, "chunk_ms": int, "audio_device": str,
     "silence_timeout_sec": (int, type(None)), "silence_after_input_sec": (int, type(None)),
     "silence_rms_threshold": int, "focus_lost_stop": bool, "hold_ms": int,
+    "ptt_keys": str, "hold_keys": str,
 }
 SUBOBJECTS = {"osd", "llm", "doubao", "icenter"}   # dict 子对象整体校验类型
+
+MODS = ("ctrl", "alt", "shift")
+COMBO_KEYS = {"space", "tab", "esc", "escape", "`"}
+
+
+def valid_combo(s):
+    """与引擎 parse_combo 同规则：修饰键任意组合 + 最多一个普通键。"""
+    if not isinstance(s, str) or not s or len(s) > 40:
+        return False
+    mods, key = set(), None
+    for part in s.split("+"):
+        p = part.strip().lower()
+        if not p:
+            return False
+        if p in MODS:
+            mods.add(p)
+        elif p in COMBO_KEYS or (len(p) == 1 and (p.isalnum() or p == "`")):
+            if key is not None:
+                return False
+            key = p
+        else:
+            return False
+    return bool(mods or key)
+
+
 BACKENDS = ("doubao", "icenter")
 
 
@@ -113,6 +139,11 @@ def sanitize(patch):
             errors.append(f"未知键: {k}")
     if "asr_backend" in clean and clean["asr_backend"] not in BACKENDS:
         errors.append("asr_backend 必须为 doubao 或 icenter")
+    for k in ("ptt_keys", "hold_keys"):
+        if k in clean and not valid_combo(clean[k]):
+            errors.append(f"{k}: 格式应为 ctrl/alt/shift 加可选单键，如 ctrl+alt 或 ctrl+alt+space")
+    if clean.get("ptt_keys") and clean.get("ptt_keys") == clean.get("hold_keys"):
+        errors.append("按住说话与按住持续对话不能用同一个组合")
     return clean, errors
 
 
@@ -421,6 +452,18 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
   </section>
 
   <section class="card">
+    <div class="card-h"><h2>快捷键</h2><span class="hint">保存并重启后生效</span></div>
+    <p class="card-desc">修饰键 ctrl / alt / shift 用 <code>+</code> 连接，末尾可加一个普通键（space、tab、esc 或单个字母数字）。按满「长按触发 ms」才开始录音，防误触。</p>
+    <div class="grid">
+      <div class="f in-mono"><label for="ptt_keys">按住说话（对讲机）</label>
+        <input type="text" id="ptt_keys" spellcheck="false" placeholder="ctrl+alt"></div>
+      <div class="f in-mono"><label for="hold_keys">按住持续对话</label>
+        <input type="text" id="hold_keys" spellcheck="false" placeholder="ctrl+alt+space"></div>
+    </div>
+    <p class="card-desc" style="margin-top:12px">「按住说话」松开即停并上屏；「按住持续对话」触发后可松手继续说，按 Esc 结束并上屏。两个组合不能相同；后者可以以前者开头（如上例 <code>ctrl+alt+space</code>），按下末尾那个键即从对讲机升级为持续模式。</p>
+  </section>
+
+  <section class="card">
     <div class="card-h"><h2>采集与判停</h2><span class="hint">只读 · 自动识别配置</span></div>
     <p class="card-desc">录音与判停按识别到的配置自动生效，无需手动调整；保存操作不会改动这些值。</p>
     <div class="ro-list">
@@ -539,6 +582,8 @@ const FIELD = [
   ["sample_rate",  "sample_rate", "n", true],
   ["chunk_ms",     "chunk_ms", "n", true],
   ["hold_ms",      "hold_ms", "n", true],
+  ["ptt_keys",     "ptt_keys", "s"],
+  ["hold_keys",    "hold_keys", "s"],
   ["silence_timeout_sec", "silence_timeout_sec", "n", true],
   ["silence_after_input_sec", "silence_after_input_sec", "n", true],
   ["silence_rms_threshold", "silence_rms_threshold", "n", true],
@@ -547,7 +592,8 @@ const FIELD = [
 ];
 const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
   enable_accelerate_text:false, enable_nonstream:true, show_utterances:true,
-  end_window_size:800, force_to_speech_time:1000, accelerate_score:0 };
+  end_window_size:800, force_to_speech_time:1000, accelerate_score:0,
+  ptt_keys:"ctrl+alt", hold_keys:"ctrl+alt+space" };
 
 function fillModels(cfg){
   const llm = cfg && cfg.llm || {};

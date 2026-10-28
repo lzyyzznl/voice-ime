@@ -38,6 +38,8 @@
   },
   "focus_lost_stop": false,
   "hold_ms": 300,
+  "ptt_keys": "ctrl+alt",
+  "hold_keys": "ctrl+alt+space",
   "llm": {
     "auto_polish": false,
     "active": "deepseek",

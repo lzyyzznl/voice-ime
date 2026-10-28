@@ -927,8 +927,11 @@ class VoiceIMEService:
             except Exception as e:
                 log.warning("发送失败: %s", e)
         session = self.Session(send)
-        # 引擎连接建立：下发配置（长按触发阈值等）
-        send({"type": "config", "hold_ms": int(self.cfg.get("hold_ms", 500))})
+        # 引擎连接建立：下发配置（长按阈值 + 两套触发快捷键）
+        send({"type": "config",
+              "hold_ms": int(self.cfg.get("hold_ms", 500)),
+              "ptt_keys": self.cfg.get("ptt_keys", "ctrl+alt"),
+              "hold_keys": self.cfg.get("hold_keys", "ctrl+alt+space")})
         with self.clients_lock:
             self.clients.append(send)
             self.active_sessions.append(session)

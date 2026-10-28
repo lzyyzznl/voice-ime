@@ -419,23 +419,11 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
   <section class="card" id="doubaoCard">
     <div class="card-h"><h2>豆包 SeedASR</h2><span class="hint" id="doubaoState">识别请求参数</span></div>
     <p class="card-desc">参数随每次识别请求下发；停顿定稿 / 首字加速按毫秒级生效。</p>
-    <div class="grid">
+    <div class="grid" style="grid-template-columns:1fr">
       <div class="f"><label for="api_key">API Key</label>
         <div class="pw"><input type="password" id="api_key" autocomplete="off" spellcheck="false"><button class="eye" id="eyeKey" type="button">显示</button></div></div>
-      <div class="f"><label for="resource_id">Resource ID（计费项）</label>
-        <select id="resource_id">
-          <option value="volc.seedasr.sauc.duration">2.0 · 时长版 volc.seedasr.sauc.duration</option>
-          <option value="volc.seedasr.sauc.concurrent">2.0 · 并发版 volc.seedasr.sauc.concurrent</option>
-          <option value="volc.bigasr.sauc.duration">1.0 · 时长版 volc.bigasr.sauc.duration</option>
-          <option value="volc.bigasr.sauc.concurrent">1.0 · 并发版 volc.bigasr.sauc.concurrent</option>
-        </select></div>
-      <div class="f"><label for="url">流式端点</label>
-        <select id="url">
-          <option value="nostream">单向流式 bigmodel_nostream（整句、准确率更优，推荐）</option>
-          <option value="by_mode">按模式：按住说话走单向、持续对话走双向（推荐）</option>
-          <option value="">全部双向 bigmodel_async（边说边出、逐句定稿）</option>
-        </select></div>
     </div>
+    <p class="card-desc" style="margin:12px 0 0">流式端点与计费项已固定为最优组合：按住说话走单向整句识别、持续对话走双向边说边出，资源按 2.0 时长版。需要改动时改 <code>config.json</code>。</p>
     <p class="card-desc" style="margin:16px 0 10px">识别参数<span style="color:var(--faint)"> · 默认值即豆包文档推荐，一般无需改</span></p>
     <div class="subgrid">
       <label class="sw"><input type="checkbox" id="enable_punc"><span class="tr"></span><span class="n">标点</span><span class="d">enable_punc</span></label>
@@ -568,8 +556,6 @@ const FIELD = [
   ["ic_secret",    "icenter.secret", "s"],
   ["ic_uac_app_id", "icenter.uac_app_id", "s"],
   ["api_key",      "doubao.api_key", "s"],
-  ["resource_id",  "doubao.resource_id", "s"],
-  ["url",          "doubao.url", "s"],
   ["enable_punc",  "doubao.request.enable_punc", "b"],
   ["enable_itn",   "doubao.request.enable_itn", "b"],
   ["enable_ddc",   "doubao.request.enable_ddc", "b"],

@@ -391,13 +391,11 @@ class VoiceIMEService:
                     lambda p: self.on_final(session, p))
         if self.cfg.get("asr_backend", "doubao") == "doubao":
             d = self.cfg.get("doubao") or {}
-            # 端点选择：nostream=全程单向（短句最准）；by_mode=按住说话走单向、
-            # 持续对话走双向（短句求准、长段求边说边出）；其余=全程双向 async
-            url_cfg = d.get("url") or ""
-            if url_cfg == "by_mode":
-                use_nostream = self._mode_b
-            else:
-                use_nostream = url_cfg == "nostream"
+            # 端点固定最优：按住说话（即停 B）走单向整句最准，持续对话走双向
+            # 边说边出。config 的 doubao.url 仅作逃生口（"nostream"=全单向，
+            # 其他=全双向），配置台不再暴露。
+            url_cfg = d.get("url") or "by_mode"
+            use_nostream = (url_cfg == "nostream") or (url_cfg == "by_mode" and self._mode_b)
             kwargs = {"url": URL_NOSTREAM} if use_nostream else {}
             return DoubaoASR(
                 api_key=d.get("api_key", ""),

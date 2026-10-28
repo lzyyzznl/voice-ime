@@ -36,7 +36,7 @@ ALLOWED = {
     "silence_timeout_sec": (int, type(None)), "silence_after_input_sec": (int, type(None)),
     "silence_rms_threshold": int, "focus_lost_stop": bool, "hold_ms": int,
 }
-SUBOBJECTS = {"osd", "llm", "doubao"}   # dict 子对象整体校验类型
+SUBOBJECTS = {"osd", "llm", "doubao", "icenter"}   # dict 子对象整体校验类型
 BACKENDS = ("doubao", "icenter")
 
 
@@ -86,6 +86,9 @@ def sanitize(patch):
                     d["request"] = {kk: vv for kk, vv in v["request"].items()
                                     if isinstance(vv, (bool, int, str))}
                 clean[k] = d
+            elif k == "icenter":
+                keys = ("env", "url", "app_id", "source", "user_id", "secret", "uac_app_id")
+                clean[k] = {kk: vv for kk, vv in v.items() if kk in keys and isinstance(vv, str)}
             elif k == "llm":
                 model_keys = ("id", "name", "endpoint", "api_key", "model", "system_prompt", "prompt")
                 d = {"active": v.get("active")} if isinstance(v.get("active"), str) else {}
@@ -361,6 +364,27 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     </div>
   </section>
 
+  <section class="card" id="icenterCard">
+    <div class="card-h"><h2>iCenter 公司自有模型</h2><span class="hint" id="icenterState">可选后端参数</span></div>
+    <p class="card-desc">仅当后端选「iCenter 内网流式」时生效，默认后端仍是豆包。参数写入 config.json 的 <code>icenter</code> 段；某项留空则回退顶层旧键。UAC token 由本机 iCenter 客户端（UDS）提供，无需填写。</p>
+    <div class="grid">
+      <div class="f"><label for="ic_env">环境 env</label>
+        <select id="ic_env">
+          <option value="prod">prod · 生产</option>
+          <option value="gray">gray · 灰度</option>
+          <option value="test">test · 测试</option>
+        </select></div>
+      <div class="f"><label for="ic_url">服务地址（可选，覆盖 env）</label><input type="text" id="ic_url" spellcheck="false" placeholder="wss://… 留空则按 env 取默认"></div>
+      <div class="f"><label for="ic_app_id">App ID</label><input type="text" id="ic_app_id" spellcheck="false"></div>
+      <div class="f"><label for="ic_source">Source</label><input type="text" id="ic_source" spellcheck="false"></div>
+    </div>
+    <div class="grid" style="margin-top:14px">
+      <div class="f"><label for="ic_user_id">User ID</label><input type="text" id="ic_user_id" spellcheck="false"></div>
+      <div class="f"><label for="ic_secret">Secret</label><input type="password" id="ic_secret" spellcheck="false" autocomplete="off"></div>
+      <div class="f"><label for="ic_uac_app_id">UAC appId（UDS 取 token）</label><input type="text" id="ic_uac_app_id" spellcheck="false" placeholder="564069206224"></div>
+    </div>
+  </section>
+
   <section class="card" id="doubaoCard">
     <div class="card-h"><h2>豆包 SeedASR</h2><span class="hint" id="doubaoState">识别请求参数</span></div>
     <p class="card-desc">参数随每次识别请求下发；停顿定稿 / 首字加速按毫秒级生效。</p>
@@ -493,6 +517,13 @@ const getPath = (o, p) => { let t = o; for (const k of p.split(".")) { if (t == 
 /* 字段 → config 路径 + 类型（s=字符串 n=数字 b=布尔） */
 const FIELD = [
   ["asr_backend",  "asr_backend", "s"],
+  ["ic_env",       "icenter.env", "s"],
+  ["ic_url",       "icenter.url", "s"],
+  ["ic_app_id",    "icenter.app_id", "s"],
+  ["ic_source",    "icenter.source", "s"],
+  ["ic_user_id",   "icenter.user_id", "s"],
+  ["ic_secret",    "icenter.secret", "s"],
+  ["ic_uac_app_id", "icenter.uac_app_id", "s"],
   ["api_key",      "doubao.api_key", "s"],
   ["resource_id",  "doubao.resource_id", "s"],
   ["url",          "doubao.url", "s"],
@@ -592,6 +623,18 @@ function collectLlm(){
 }
 
 function fillForm(cfg){
+  // 兼容旧配置：iCenter 参数曾在顶层（app_id/source/user_id/secret/env），
+  // 缺 icenter 段时用顶层值预填，让界面显示的是实际生效值。
+  const ic = cfg.icenter || {};
+  cfg.icenter = {
+    env:      ic.env || cfg.env || "prod",
+    url:      ic.url || "",
+    app_id:   ic.app_id || cfg.app_id || "",
+    source:   ic.source || cfg.source || "",
+    user_id:  ic.user_id || cfg.user_id || "",
+    secret:   ic.secret || cfg.secret || "",
+    uac_app_id: ic.uac_app_id || "",
+  };
   fillModels(cfg);
   for (const [id, path, type, ro] of FIELD){
     let v = getPath(cfg, path);
@@ -647,6 +690,11 @@ function syncDisabled(){
   const rb = document.querySelector('input[name="asr_backend"]:checked');
   const doubao = rb && rb.value === "doubao";
   const card = $("doubaoCard");
+  const icCard = $("icenterCard");
+  const icenter = rb && rb.value === "icenter";
+  icCard.classList.toggle("is-off", !icenter);
+  $("icenterState").textContent = icenter ? "公司自有模型 · 参数生效" : "可选后端 · 参数已冻结";
+  icCard.querySelectorAll("input,select").forEach(el => el.disabled = !icenter);
   card.classList.toggle("is-off", !doubao);
   $("doubaoState").textContent = doubao ? "识别请求参数" : "当前后端非豆包 · 参数已冻结";
   card.querySelectorAll("input,select").forEach(el => el.disabled = !doubao);

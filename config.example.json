@@ -1,10 +1,14 @@
 {
-  "app_id": "YOUR_APP_ID",
-  "source": "YOUR_SOURCE",
-  "user_id": "YOUR_USER_ID",
-  "secret": "YOUR_SECRET",
-  "env": "prod",
   "asr_backend": "doubao",
+  "icenter": {
+    "env": "prod",
+    "url": "",
+    "app_id": "YOUR_APP_ID",
+    "source": "YOUR_SOURCE",
+    "user_id": "YOUR_USER_ID",
+    "secret": "YOUR_SECRET",
+    "uac_app_id": "564069206224"
+  },
   "doubao": {
     "api_key": "YOUR_DOUBAO_API_KEY",
     "resource_id": "volc.seedasr.sauc.duration",

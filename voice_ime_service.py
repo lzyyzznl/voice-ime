@@ -389,7 +389,7 @@ class VoiceIMEService:
         def _cbs():
             return (lambda p: self.on_interim(session, p),
                     lambda p: self.on_final(session, p))
-        if self.cfg.get("asr_backend", "icenter") == "doubao":
+        if self.cfg.get("asr_backend", "doubao") == "doubao":
             d = self.cfg.get("doubao") or {}
             # url=nostream → 单向流式（流中 VAD 判停即返回整句 final，准确率更优）
             url = URL_NOSTREAM if d.get("url") == "nostream" else None
@@ -401,10 +401,16 @@ class VoiceIMEService:
                 sample_rate=self.cfg.get("sample_rate", 16000),
                 **kwargs,
             ).start(*_cbs())
+        # iCenter（公司自有模型）：优先 config.icenter 段，缺省回退顶层老键（兼容旧配置）
+        ic = self.cfg.get("icenter") or {}
         return StreamingASR(
-            app_id=self.cfg["app_id"], source=self.cfg["source"],
-            user_id=self.cfg["user_id"], secret=self.cfg["secret"],
-            env=self.cfg.get("env", "prod"),
+            app_id=ic.get("app_id") or self.cfg.get("app_id", ""),
+            source=ic.get("source") or self.cfg.get("source", ""),
+            user_id=ic.get("user_id") or self.cfg.get("user_id", ""),
+            secret=ic.get("secret") or self.cfg.get("secret", ""),
+            env=ic.get("env") or self.cfg.get("env", "prod"),
+            url=ic.get("url") or None,
+            uac_app_id=ic.get("uac_app_id") or None,
             sample_rate=self.cfg.get("sample_rate", 16000),
         ).start(*_cbs())
 

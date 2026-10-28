@@ -31,14 +31,18 @@ ENVS = {
 
 
 # ── UAC 凭证（与 icenter-cli auth.rs 一致）────────────────────
-def get_uds_credentials():
-    """从本机 UDS 服务取 (工号, UAC token)。"""
+DEFAULT_UAC_APP_ID = "564069206224"   # iCenter 桌面客户端在 UDS 上注册的 appId
+UDS_PORTS = (19996, 29273, 5865)
+
+
+def get_uds_credentials(app_id=DEFAULT_UAC_APP_ID):
+    """从本机 UDS 服务取 (工号, UAC token)。appId 可被 config.icenter.uac_app_id 覆盖。"""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    for port in (19996, 29273, 5865):
+    for port in UDS_PORTS:
         try:
-            url = f"https://127.0.0.1:{port}/requestToken?appId=564069206224&callback=cb&_=1"
+            url = f"https://127.0.0.1:{port}/requestToken?appId={app_id}&callback=cb&_=1"
             req = urllib.request.Request(
                 url, headers={"Referer": "https://uac.zte.com.cn", "Host": "127.0.0.1"}
             )
@@ -76,12 +80,14 @@ class StreamingASR:
     """单次 PTT 会话的流式转写客户端（同步模型，线程安全发送）。"""
 
     def __init__(self, app_id, source, user_id, secret, env="prod",
-                 sample_rate=16000, sample_width=2):
+                 sample_rate=16000, sample_width=2, url=None, uac_app_id=None):
         self.app_id = app_id
         self.source = source
         self.user_id = user_id
         self.secret = secret
-        self.url = ENVS.get(env, ENVS["prod"])
+        # url 优先（config.icenter.url 直填端点），否则按 env 取内置默认
+        self.url = url or ENVS.get(env, ENVS["prod"])
+        self.uac_app_id = uac_app_id or DEFAULT_UAC_APP_ID
         self.sample_rate = sample_rate
         self.sample_width = sample_width
         self.ws = None
@@ -95,7 +101,7 @@ class StreamingASR:
     # ── 生命周期 ──
     def start(self, on_interim=None, on_final=None):
         """建立连接并发送 StartTranscription。阻塞直到会话建立。"""
-        empno, token = get_uds_credentials()
+        empno, token = get_uds_credentials(self.uac_app_id)
         if not token:
             raise RuntimeError("无法从 UDS 获取 UAC token，请确认 iCenter 客户端已登录")
 

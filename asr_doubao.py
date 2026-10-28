@@ -53,13 +53,13 @@ class DoubaoASR:
                  url=URL, sample_rate=16000, sample_width=2, request=None):
         self.api_key = api_key
         self.resource_id = resource_id
-        self.url = url
+        self.url = url or URL          # None/空 → 双向流式端点
         self.sample_rate = sample_rate
         self.sample_width = sample_width
         self.request_overrides = request or {}   # config.doubao.request 覆盖默认参数
         self.ws = None
         self.finals = []                 # 定稿句文本（按序）
-        self._nostream = "nostream" in url   # 单向流式：整句结果随 result.text 一次返回
+        self._nostream = "nostream" in (url or "")   # 单向流式：整句结果随 result.text 一次返回
         self._nostream_text = ""             # nostream 已识别文本（避免反复提交同一句）
         self._seq = 1
         self._on_interim = None
@@ -69,6 +69,7 @@ class DoubaoASR:
         self._error = None
         self._done_ranges = set()        # 已提交的 definite 句 (start,end,text)
         self._last_interim = ""          # 上次 interim 文本（去重）
+        self._last_text = ""             # 最近一帧 result.text（流被直接关闭时的兜底）
 
     # ── 生命周期 ──
     def start(self, on_interim=None, on_final=None):
@@ -190,12 +191,14 @@ class DoubaoASR:
                     self.finals.append(t)
                     if self._on_final:
                         self._on_final({"text": t})
-        # nostream：无 utterance，整句结果随 result.text 一次返回。末包到达即视为
-        # 定稿提交（此前各帧 result.text 为累计中间值，只作 preedit 预览，不提交），
-        # 避免"识别了却不上屏"（老 bug：识别文本只走 interim，从不 commit）
-        if self._nostream and not utts:
+        # 无 utterance（nostream 端点，或双向端点未启用分句）：整句结果随
+        # result.text 返回。末包到达即定稿提交，其余帧只作 preedit 预览。
+        # 两种端点都走这条路——双向端点在某些账号/参数下同样不返回 utterances，
+        # 以前只认 utterances 会导致"识别了却一个字都不上屏"。
+        if not utts:
             text = (r.get("text") or "").strip()
-            # 末包 → 提交定稿；否则仅预览（same 文本去重，防每帧重复 on_interim）
+            if text:
+                self._last_text = text      # 兜底：流被服务端直接关闭时也能提交
             if is_last and text and text != self._nostream_text:
                 self._nostream_text = text
                 self.finals.append(text)
@@ -242,6 +245,12 @@ class DoubaoASR:
                 pass
         self._completed.wait(timeout=timeout)
         self.close()
+        # 兜底：没有任何定稿句，但流里收到过文本（服务端直接关流、末包不带
+        # is_last 的情况）→ 用最后一份文本作为整段结果，避免"识别了却不上屏"
+        if not self.finals:
+            fallback = self._last_text or self._last_interim
+            if fallback:
+                self.finals.append(fallback)
         return self.finals
 
     def close(self):

@@ -57,8 +57,7 @@ vi config.json     # 或浏览器开 http://127.0.0.1:19530 配置台
   "asr_backend": "doubao",
   "doubao": {
     "api_key": "<豆包火山引擎 Key>",
-    "resource_id": "volc.seedasr.sauc.duration",
-    "url": "nostream"
+    "resource_id": "volc.seedasr.sauc.duration"
   },
   "llm": {
     "auto_polish": true,

@@ -13,6 +13,7 @@ Unix socket IPC 服务：接收 fcitx 引擎命令，执行录音 + 流式 ASR�
                {"type":"done","ok":true|false}
 """
 import array
+import collections
 import ctypes
 import json
 import logging
@@ -28,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asr_client import StreamingASR
-from asr_doubao import DoubaoASR, URL_NOSTREAM
+from asr_doubao import DoubaoASR, URL_ASYNC
 import llm_polish
 
 SOCKET_PATH = "/tmp/voiceime-service.sock"
@@ -90,37 +91,55 @@ class Recorder(threading.Thread):
         # 音频路由：chunk → 当前 ASR 连接；切换窗口（无目标/发送失败）→ 缓存待补发
         self._route_lock = threading.Lock()
         self._target = None
-        self._pending = []
+        # 发送与录音解耦：parec 读取线程只入队，独立发送线程做 ws.send。
+        # 网络阻塞只卡发送线程，录音照常读取——否则 parec 管道积压、音频丢失，
+        # 且发包间隔超时会让服务端主动结束会话（bp 45000081 等包超时）。
+        # 队列同时充当切换窗口的缓存：无目标时 sender 停在队首等待，音频不丢。
+        self._buf = collections.deque()
+        self._buf_cv = threading.Condition()
+        self._sender = None
 
     def route_to(self, target):
         """切换音频发送目标（None = 缓存模式，等待新连接接管）"""
         with self._route_lock:
             self._target = target
+        with self._buf_cv:
+            self._buf_cv.notify_all()
 
     def flush_pending(self):
-        """新连接接管后补发切换窗口缓存的音频"""
-        with self._route_lock:
-            if self._target is None:
-                return
-            pending, self._pending = self._pending, []
-        for i, c in enumerate(pending):
-            if not self._target.send_audio(c):
-                # 发送失败：剩余缓存放回，等待下次接管补发
-                with self._route_lock:
-                    self._pending = pending[i:] + self._pending
-                break
+        """新连接接管后等待积压音频发完（sender 自动等待 target 就绪）"""
+        with self._buf_cv:
+            self._buf_cv.wait_for(lambda: not self._buf, timeout=5)
 
     def _dispatch(self, chunk):
-        """路由一个音频 chunk：有目标直接发，无目标/失败进缓存"""
-        with self._route_lock:
-            t = self._target
-            if t is None:
-                self._pending.append(chunk)
-                return True
-        if not t.send_audio(chunk):
-            with self._route_lock:
-                self._pending.append(chunk)
-        return True
+        """只入队，永不阻塞录音线程"""
+        with self._buf_cv:
+            self._buf.append(chunk)
+            self._buf_cv.notify()
+
+    def _send_loop(self):
+        """独立发送线程：按序消费队列，包不丢、不重排。"""
+        while True:
+            with self._buf_cv:
+                while not self._buf:
+                    if self._stop_evt.is_set():
+                        return
+                    self._buf_cv.wait(0.2)
+                chunk = self._buf[0]
+            # 等目标就绪（切换窗口期间音频留在队列里）
+            while True:
+                with self._route_lock:
+                    t = self._target
+                if t is not None or self._stop_evt.is_set():
+                    break
+                time.sleep(0.02)
+            if t is None:          # 已停止且无目标：丢弃剩余
+                return
+            ok = t.send_audio(chunk)
+            with self._buf_cv:
+                self._buf.popleft()
+            if not ok:
+                log.warning("音频发送失败(连接已断),丢弃 1 包")
 
     def run(self):
         if self.device == "default":
@@ -131,6 +150,8 @@ class Recorder(threading.Thread):
                    "--channels", "1", "--format", "s16le"]
         log.info("启动录音: %s", " ".join(cmd))
         self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._sender = threading.Thread(target=self._send_loop, daemon=True, name="asr-sender")
+        self._sender.start()
         try:
             while not self._stop_evt.is_set():
                 chunk = self._proc.stdout.read(self.chunk_bytes)
@@ -172,8 +193,8 @@ class Recorder(threading.Thread):
                     self._proc.kill()
 
     def stop_and_drain(self):
-        self._stop_evt.set()
         if self._proc is None:
+            self._stop_evt.set()
             return
         if self._proc.poll() is None:
             self._proc.terminate()
@@ -181,6 +202,7 @@ class Recorder(threading.Thread):
                 self._proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+        # 先收完管道残余（此时发送线程仍在消费），再停
         try:
             while True:
                 chunk = self._proc.stdout.read(self.chunk_bytes)
@@ -189,7 +211,13 @@ class Recorder(threading.Thread):
                 self._dispatch(chunk)
         except Exception as e:
             log.warning("读取录音残余失败: %s", e)
+        self._stop_evt.set()
+        with self._buf_cv:
+            self._buf_cv.notify_all()
         self.join(timeout=2)
+        # 等发送线程把队列发完（切换续录时靠它保证尾部音频不丢）
+        with self._buf_cv:
+            self._buf_cv.wait_for(lambda: not self._buf, timeout=3)
         log.info("录音结束")
 
 
@@ -392,15 +420,15 @@ class VoiceIMEService:
                     lambda p: self.on_final(session, p))
         if self.cfg.get("asr_backend", "doubao") == "doubao":
             d = self.cfg.get("doubao") or {}
-            # 端点固定单向（bigmodel_nostream）：实测双向 async 端点在 12~14s
-            # 的短段上有一半概率返回空（二遍 VAD 未触发，整段丢弃），不可用；
-            # 单向端点稳定。长度上限由 _rotate_sec() 的 12s 无缝切换兜住。
+            # 优化双向流式端点（bigmodel_async）：实测逐句 definite 正常，
+            # 帧数最少且有实时 preedit 预览。单次会话不再需要按 15s 切段
+            # （该限制来自 espeak 噪声音频的误测，长音频实测无截断）。
             return DoubaoASR(
                 api_key=d.get("api_key", ""),
                 resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
                 request=d.get("request"),
                 sample_rate=self.cfg.get("sample_rate", 16000),
-                url=URL_NOSTREAM,
+                url=URL_ASYNC,
             ).start(*_cbs())
         # iCenter（公司自有模型）：优先 config.icenter 段，缺省回退顶层老键（兼容旧配置）
         ic = self.cfg.get("icenter") or {}
@@ -587,7 +615,7 @@ class VoiceIMEService:
         # ASR 握手放后台：慢连接不再冻结控制通道（模式/草稿/cancel 照常响应）
         threading.Thread(target=self._attach_asr, args=(session, gen), daemon=True).start()
         # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
-        # 单次会话上限（豆包约 15s / iCenter 60s）：静默切换 ASR 会话续录，
+        # 单次会话兜底上限（豆包 300s / iCenter 60s）：静默切换 ASR 会话续录，
         # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
         def auto_stop():
             time.sleep(self._rotate_sec())
@@ -650,13 +678,13 @@ class VoiceIMEService:
                 return
 
     def _rotate_sec(self):
-        """单次 ASR 会话的音频上限（留安全余量）。
+        """单次 ASR 会话的兜底上限（正常一次说话远到不了）。
 
-        豆包流式识别单次会话只认前约 15 秒音频：实测送 29.5s，
-        nostream 端点返回全空、async 端点只返回前 14.7s 的内容，
-        超出部分静默丢弃 —— 所以必须在 15s 前主动换代续录。
-        iCenter 的限制是 60s。"""
-        return 12 if self.cfg.get("asr_backend", "doubao") == "doubao" else 60
+        豆包 async 端点长音频实测无截断：30s 单会话完整识别、逐句 definite
+        定稿。旧的"只认前 15 秒"结论来自 espeak 噪声音频的误测，已推翻。
+        保留 300s 只为防连接老化，不再按 12s 切段（切段会让长句被拆成
+        多段上屏 + 分段润色）。iCenter 服务端硬限制 60s。"""
+        return 300 if self.cfg.get("asr_backend", "doubao") == "doubao" else 60
 
     def switch_session(self, session, gen):
         """会话上限到期：旧会话停止提交 → 新会话接管同一录音流（无缝续录）"""

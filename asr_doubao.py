@@ -27,10 +27,13 @@ from websockets.sync.client import connect
 
 log = logging.getLogger("asr-doubao")
 
-# 流式输入端点：整段音频（≤15s）在流末一次性返回全部定稿句，准确率最高。
-# 双向流式（bigmodel / bigmodel_async）实测在该账号下不稳定（短段常返回空），
-# 故不使用。
-URL_NOSTREAM = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+# 优化双向流式端点（上游推荐）：只在结果变化时下帧，RTF/首末字延迟最好。
+# 实测本账号三端点均可逐句 definite 定稿：
+#   · 18.4s 四句：nostream 73 帧 / bigmodel 87 帧 / async 32 帧，4 句全部定稿
+#   · 3.9s 单句 ×3 次：三端点各 3/3 命中；async 9 帧、nostream 仅 2 帧
+#   → async 既有实时预览（preedit 有字）又帧数最少。
+# （旧结论"async 短段返回空"来自 espeak 噪声音频的误测，已推翻。）
+URL_ASYNC = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
 
 _HEADER = b"\x11"          # version=1, header_size=1(块)
 
@@ -50,10 +53,10 @@ class DoubaoASR:
     """单次录音会话的豆包流式转写客户端（同步模型，与 StreamingASR 一致）。"""
 
     def __init__(self, api_key, resource_id="volc.seedasr.sauc.duration",
-                url=URL_NOSTREAM, sample_rate=16000, sample_width=2, request=None):
+                url=URL_ASYNC, sample_rate=16000, sample_width=2, request=None):
         self.api_key = api_key
         self.resource_id = resource_id
-        self.url = url or URL_NOSTREAM
+        self.url = url or URL_ASYNC
         self.sample_rate = sample_rate
         self.sample_width = sample_width
         self.request_overrides = request or {}   # config.doubao.request 覆盖默认参数

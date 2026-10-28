@@ -14,8 +14,8 @@
 ```mermaid
 flowchart LR
     E[fcitx 插件 voiceime.c<br/>fcitx4 Module addon<br/>全局 pre-input / pre-release 过滤器] -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
-    S -->|"parec 16kHz PCM<br/>200ms 音频帧 + 60s 切换缓存"| R[Recorder]
-    R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 nostream 双向流式]
+    S -->|"parec 16kHz PCM<br/>200ms 音频帧 · 独立发送线程（不阻塞录音）"| R[Recorder]
+    R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 async 双向流式]
     A -->|"interim / definite final"| S
     S -->|"auto_polish 开启时"| L[润色: llm_polish.py<br/>DeepSeek 官方 / ZTE MaaS 网关<br/>JSON Output · 多模型可切换]
     L --> S
@@ -45,7 +45,7 @@ voice-ime/
 │   └── Makefile             # make && sudo make install
 ├── icons/                   # 图标（gen_icons.py + SVG）
 ├── voice_ime_service.py     # core：Unix socket 服务、录音、ASR 调度、润色队列
-├── asr_doubao.py            # 豆包流式 ASR 客户端（nostream 定稿）
+├── asr_doubao.py            # 豆包流式 ASR 客户端（bigmodel_async 逐句定稿）
 ├── asr_client.py            # iCenter ASR 客户端（旧后端，保留兼容）
 ├── llm_polish.py            # LLM 润色共享模块（core 自动润色 + 草稿窗优化）
 ├── voiceime_osd.py          # 录音浮窗（GTK3，系统 python3.6）

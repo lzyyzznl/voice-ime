@@ -359,9 +359,10 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <div class="backends">
       <label class="rb"><input type="radio" name="asr_backend" value="doubao" id="rbDoubao">
         <span class="opt"><span class="t">豆包 SeedASR 2.0</span><span class="d">云端流式 · 首字快 · 停顿定稿（推荐）</span></span></label>
-      <label class="rb"><input type="radio" name="asr_backend" value="icenter" id="rbIcenter">
+      <label class="rb" id="icenterOpt"><input type="radio" name="asr_backend" value="icenter" id="rbIcenter">
         <span class="opt"><span class="t">iCenter 内网流式</span><span class="d">内网闭环 · 首字约 4s · 凭据已保留</span></span></label>
     </div>
+    <p class="card-desc" id="hiddenWarn" style="display:none;margin:10px 0 0;color:var(--red)"></p>
   </section>
 
   <section class="card" id="icenterCard">
@@ -680,12 +681,27 @@ function refreshState(){
     $("bdgPid").textContent = svc.alive ? "PID " + svc.pid : "已停止";
     setDot("bdgSvc", svc.alive ? "ok" : "bad");
     setDot("bdgEng", svc.engine ? "ok" : "");
-    if (s.config && !window._filled){ fillForm(s.config); syncDisabled(); window._filled = true; }
+    if (s.config && !window._filled){ fillForm(s.config); applyHidden(s.config); syncDisabled(); window._filled = true; }
   }).catch(() => { setDot("bdgSvc", "bad"); setDot("bdgEng", ""); });
 }
+function applyHidden(cfg){
+  /* 隐藏配置：config.hidden.icenter 为真才暴露 iCenter 后端与参数（只支持手改 JSON 打开） */
+  const show = !!(cfg && cfg.hidden && cfg.hidden.icenter);
+  $("icenterOpt").style.display = show ? "" : "none";
+  $("icenterCard").style.display = show ? "" : "none";
+  document.querySelector(".backends").style.gridTemplateColumns = show ? "" : "1fr";
+  const backend = cfg && cfg.asr_backend;
+  const mismatch = !show && backend && backend !== "doubao";
+  const warn = $("hiddenWarn");
+  warn.style.display = mismatch ? "" : "none";
+  warn.textContent = mismatch
+    ? "config.json 的 asr_backend = " + backend + "，但隐藏配置未开启：请改回 doubao，或设 hidden.icenter=true 后刷新页面。"
+    : "";
+}
 function syncDisabled(){
+  // 隐藏 iCenter 时没有选中项 → 按豆包处理，避免豆包参数被误冻结
   const rb = document.querySelector('input[name="asr_backend"]:checked');
-  const doubao = rb && rb.value === "doubao";
+  const doubao = !rb || rb.value === "doubao";
   const card = $("doubaoCard");
   const icCard = $("icenterCard");
   const icenter = rb && rb.value === "icenter";

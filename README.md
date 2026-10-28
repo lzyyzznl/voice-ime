@@ -98,8 +98,9 @@ voice-ime/
 
 | 键 | 说明 |
 |---|---|
-| `asr_backend` | `doubao`（默认）/ `icenter`（公司自有模型，可选） |
+| `asr_backend` | `doubao`（默认）/ `icenter`（公司自有模型；配置台需 `hidden.icenter=true` 才暴露） |
 | `icenter.*` | 公司自有模型参数：`env`（prod/gray/test，决定端点）、`app_id`、`source`、`user_id`、`secret`、`uac_app_id`（UDS 取 token 的 appId，默认 564069206224）；`url` 仅支持手改 JSON（配置台不提供，填了即覆盖 env）；任一项留空回退顶层同名字段（兼容旧配置） |
+| `hidden.icenter` | 隐藏开关：`false`（默认）时配置台只暴露豆包；改手写 JSON 为 `true` 并刷新页面，才显示 iCenter 后端与参数 |
 | `doubao.api_key` | 豆包火山引擎 API Key |
 | `doubao.request.end_window_size` | **VAD 结束静音窗口 ms**（500=停顿 500ms 定稿，越小响应越快但易碎句） |
 | `doubao.request.force_to_speech_time` | 起音保护 ms：开口后 1s 内不切句（防开头停顿误切） |

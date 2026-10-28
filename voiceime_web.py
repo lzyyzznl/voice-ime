@@ -60,7 +60,8 @@ def valid_combo(s):
             key = p
         else:
             return False
-    return bool(mods or key)
+    # 必须带修饰键：裸字母/空格在任意输入框打字都会误触发录音
+    return bool(mods)
 
 
 BACKENDS = ("doubao", "icenter")
@@ -141,7 +142,7 @@ def sanitize(patch):
         errors.append("asr_backend 必须为 doubao 或 icenter")
     for k in ("ptt_keys", "hold_keys"):
         if k in clean and not valid_combo(clean[k]):
-            errors.append(f"{k}: 格式应为 ctrl/alt/shift 加可选单键，如 ctrl+alt 或 ctrl+alt+space")
+            errors.append(f"{k}: 必须包含 ctrl/alt/shift 修饰键，可加一个普通键，如 ctrl+alt 或 ctrl+alt+space")
     if clean.get("ptt_keys") and clean.get("ptt_keys") == clean.get("hold_keys"):
         errors.append("按住说话与按住持续对话不能用同一个组合")
     return clean, errors
@@ -442,12 +443,12 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
 
   <section class="card">
     <div class="card-h"><h2>快捷键</h2><span class="hint">保存并重启后生效</span></div>
-    <p class="card-desc">修饰键 ctrl / alt / shift 用 <code>+</code> 连接，末尾可加一个普通键（space、tab、esc 或单个字母数字）。按满「长按触发 ms」才开始录音，防误触。</p>
+    <p class="card-desc">点击输入框后<b>直接按下想要的组合键</b>，松开即填入；Esc 取消。修饰键支持 ctrl / alt / shift，末尾可带一个普通键（space、tab 或单个字母数字）。按满「长按触发 ms」才开始录音，防误触。</p>
     <div class="grid">
       <div class="f in-mono"><label for="ptt_keys">按住说话（对讲机）</label>
-        <input type="text" id="ptt_keys" spellcheck="false" placeholder="ctrl+alt"></div>
+        <input type="text" id="ptt_keys" spellcheck="false" autocomplete="off" placeholder="点击后按下组合键"></div>
       <div class="f in-mono"><label for="hold_keys">按住持续对话</label>
-        <input type="text" id="hold_keys" spellcheck="false" placeholder="ctrl+alt+space"></div>
+        <input type="text" id="hold_keys" spellcheck="false" autocomplete="off" placeholder="点击后按下组合键"></div>
     </div>
     <p class="card-desc" style="margin-top:12px">「按住说话」松开即停并上屏；「按住持续对话」触发后可松手继续说，按 Esc 结束并上屏。两个组合不能相同；后者可以以前者开头（如上例 <code>ctrl+alt+space</code>），按下末尾那个键即从对讲机升级为持续模式。</p>
   </section>
@@ -886,6 +887,55 @@ $("eyeKey").addEventListener("click", () => {
   i.type = show ? "text" : "password";
   $("eyeKey").textContent = show ? "隐藏" : "显示";
 });
+
+/* ── 快捷键捕获：聚焦后直接按组合键 ────── */
+const MODKEY = { Control:"ctrl", Alt:"alt", Shift:"shift" };
+const PLAINKEY = { " ":"space", Tab:"tab" };
+for (const ch of "abcdefghijklmnopqrstuvwxyz0123456789") PLAINKEY[ch] = ch;
+for (const ch of "ABCDEFGHIJKLMNOPQRSTUVWXYZ") PLAINKEY[ch] = ch.toLowerCase();
+
+function bindHotkey(id){
+  const el = $(id); if (!el) return;
+  const PH = el.placeholder;
+  let mods = new Set(), keyName = "", orig = "", last = "";
+  /* soft=true 只刷新显示，不更新 last（松手时不能把已按过的修饰键抹掉） */
+  const render = soft => {
+    el.value = [...mods, keyName].filter(Boolean).join("+");
+    if (!soft) last = el.value;
+  };
+  el.addEventListener("focus", () => {
+    orig = el.value; mods.clear(); keyName = ""; last = "";
+    el.value = "";                      /* 清空显示，明确进入捕获态 */
+    el.placeholder = "按下组合键…（Esc 取消）";
+  });
+  el.addEventListener("blur", () => {
+    el.placeholder = PH;
+    if (!el.value) el.value = orig;     /* 没按任何键就离开 → 恢复原值 */
+  });
+  el.addEventListener("keydown", e => {
+    if (e.key === "Escape") { el.value = orig; el.blur(); return; }
+    const m = MODKEY[e.key];
+    if (m) { e.preventDefault(); mods.add(m); render(); return; }
+    const k = PLAINKEY[e.key];
+    if (!k) return;              /* 不支持的键：忽略，继续等待 */
+    e.preventDefault(); e.stopPropagation();
+    if (!mods.size) {            /* 裸键会跟打字冲突：提示并继续等待 */
+      el.placeholder = "需要至少一个修饰键（ctrl / alt / shift）";
+      return;
+    }
+    keyName = k; render(); el.blur();
+  });
+  el.addEventListener("keyup", e => {
+    const m = MODKEY[e.key];
+    if (!m || keyName) return;
+    e.preventDefault();
+    const done = last;
+    mods.delete(m);
+    if (!mods.size) { el.value = done || orig; el.blur(); }
+    else render(true);
+  });
+}
+bindHotkey("ptt_keys"); bindHotkey("hold_keys");
 
 $("btnSave").addEventListener("click", () => save(false));
 $("btnSaveRestart").addEventListener("click", () => save(true));

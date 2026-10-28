@@ -5,12 +5,13 @@
 在 ZTE 内网环境下，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
 **默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**——不碰剪贴板，一句话说完松手即可。
 
+它是 fcitx 4 的 **Module addon**（注册全局按键过滤器），**不占输入法位**：拼音输入法（搜狗）可常驻激活，打字和说话随时切换、不用切输入法。
+
 ## 架构
 
 ```mermaid
 flowchart LR
-    U[按住 Ctrl+Alt 说话<br/>（松开即停，Ctrl+Tab 切持续 A）] --> E[fcitx 引擎 voiceime.c<br/>fcitx4 IM addon]
-    E -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
+    E[fcitx 插件 voiceime.c<br/>fcitx4 Module addon<br/>全局 pre-input / pre-release 过滤器] -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
     S -->|"parec 16kHz PCM<br/>200ms 音频帧 + 60s 切换缓存"| R[Recorder]
     R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 nostream 双向流式]
     A -->|"interim / definite final"| S
@@ -36,8 +37,8 @@ flowchart LR
 
 ```
 voice-ime/
-├── fcitx-engine/            # fcitx 引擎（C 插件，fcitx4）
-│   ├── voiceime.c           # 引擎主体：拦截 Ctrl+Alt 对讲机、Ctrl+Tab 切模式、commit/preedit
+├── fcitx-engine/            # fcitx 插件（C，fcitx4 Module addon）
+│   ├── voiceime.c           # 插件主体：全局按键过滤器，Ctrl+Alt 对讲机、Ctrl+Alt+Tab 切模式、commit/preedit
 │   ├── fcitx-voiceime.conf  # addon 配置
 │   └── Makefile             # make && sudo make install
 ├── icons/                   # 图标（gen_icons.py + SVG）
@@ -59,20 +60,20 @@ voice-ime/
 ## 使用
 
 对讲机（默认，B）：按住 Ctrl+Alt 说话，**松开即停**并上屏。一句话说完松手即可。
-持续（A）：按 **Ctrl+Tab** 切过去，按住 ≥0.3s 触发录音后**可松手继续说**，说完按 **Escape** 停止提交。
+持续（A）：按 **Ctrl+Alt+Tab** 切过去，按住 ≥0.3s 触发录音后**可松手继续说**，说完按 **Escape** 停止提交。
 
 | 按键 | 作用 |
 |---|---|
 | **Ctrl+Alt 按住** | 开始录音（≥0.3s 防误触，提示音 + 声波浮窗） |
 | **松开 Ctrl/Alt** | B 对讲机：停止并上屏 |
-| **Ctrl+Tab** | 切换 A 持续 / B 对讲机模式（默认 B） |
+| **Ctrl+Alt+Tab** | 切换 A 持续 / B 对讲机模式（默认 B） |
 | **Escape** | A 持续模式：停止提交 |
 | **单独按 Ctrl** | A 持续录音中：切草稿窗（再按切回） |
 | **Ctrl+Alt+Shift 三键** | B 对讲机空闲时：切草稿窗 |
 
-1. 输入法切换到「语音输入」
+1. 保持拼音输入法（搜狗）激活即可；`fcitx-remote` 返回 `2` 表示 fcitx 已激活（否则按 Ctrl+Space 激活）
 2. 聚焦目标输入框
-3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停上屏；或 **Ctrl+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
+3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停上屏；或 **Ctrl+Alt+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
 4. 停顿处句子自动上屏（VAD 500ms 定稿）
 5. `auto_polish: true`（Web 配置台开关）时每句先经 LLM 润色再上屏
 
@@ -139,7 +140,7 @@ tail -f logs/voiceime-engine.log    # 引擎：按键、preedit/commit
 tail -f logs/voiceime-service.log   # core：命令/录音/识别/润色耗时
 tail -f logs/voiceime-osd.log       # 浮窗
 ss -x | grep voiceime               # 引擎↔core 连接（1 条 ESTAB）
-fcitx-remote -s voiceime            # 切换输入法
+fcitx-remote                        # 输入法状态（2=激活；语音需要激活态）
 ```
 
 ## 润色模型接入（多模型）

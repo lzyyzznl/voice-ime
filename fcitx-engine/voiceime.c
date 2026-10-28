@@ -1,16 +1,22 @@
 /*
- * fcitx-voiceime: 语音输入法引擎（fcitx 4）
+ * fcitx-voiceime: 语音输入插件（fcitx 4，Module addon）
  * ============================================
- * 通过 Unix socket 与 Python 语音服务（voice_ime_service.py）通信：
- *   - Ctrl+Alt 按住 ≥300ms 触发录音（防误触）
+ * 注册全局 pre-input / pre-release 按键过滤器，因此**不占用输入法位**：
+ *   - 拼音输入法（搜狗）可常驻激活，字母照常打中文
+ *   - Ctrl+Alt 按住 ≥300ms 触发录音（任意输入法激活时都生效）
  *   - 松开 Ctrl/Alt：对讲机 B 模式 → 停止并提交（默认）
- *   - Ctrl+Tab 切换 B 对讲机 / A 持续模式；A 下 Escape 停止提交
+ *   - Ctrl+Alt+Tab 切换 B 对讲机 / A 持续模式；A 下 Escape 停止提交
  *   - 录音中单独 Ctrl（A）或空闲 Ctrl+Alt+Shift 三键（B）→ 切草稿窗
  *   - ASR 中间结果 → preedit 实时更新（20ms 主循环轮询队列）
  *
+ * 通过 Unix socket 与 Python 语音服务（voice_ime_service.py）通信。
  * 不依赖剪贴板：文本经 fcitx 的 XIM 管线直接提交。
+ *
+ * 前提：fcitx 处于激活状态（IS_ACTIVE）。Ctrl+Space 关闭输入法后 fcitx
+ * 不派发 filter，语音与拼音会同时失效。
  */
 #include <fcitx/fcitx.h>
+#include <fcitx/hook.h>
 #include <fcitx-utils/utils.h>
 #include <fcitx/ime.h>
 #include <fcitx/keys.h>
@@ -71,6 +77,7 @@ typedef struct _VoiceIM {
     volatile gboolean recv_running;
     GThread* recv_thread;
     GAsyncQueue* queue;             /* recv_thread → 主循环 消息队列（线程安全） */
+    FcitxInputContext* last_ic;     /* 上一轮轮询的焦点上下文（检测失焦，替代 IM OnClose） */
 } VoiceIM;
 
 static VoiceIM* g_voiceim = NULL;   /* fcitx 单实例 */
@@ -81,6 +88,7 @@ static void refresh_ui(VoiceIM* im);  /* 前向声明 */
 static void toggle_rec_mode(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void toggle_draft(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void stop_and_submit(VoiceIM* im);  /* 前向声明（DoInput 使用） */
+static void stop_recording_on_lost_focus(VoiceIM* im);  /* 前向声明（poll_queue_cb 使用） */
 
 /* ─────────────────────────── IPC ─────────────────────────── */
 
@@ -209,6 +217,21 @@ static void poll_queue_cb(void* data)
 {
     VoiceIM* im = data;
     VoiceMsg* m;
+
+    /* 焦点变化检测（替代原 IM OnClose）：IC 变了视为失焦，停录并清 preedit。
+       Cancel 语义见 stop_recording_on_lost_focus 注释。 */
+    {
+        FcitxInputContext* ic = FcitxInstanceGetCurrentIC(im->owner);
+        if (ic != im->last_ic) {
+            if (im->last_ic) {
+                dbg_log("焦点变化: %p → %p", (void*)im->last_ic, (void*)ic);
+                stop_recording_on_lost_focus(im);
+                clear_preedit(im);
+                refresh_ui(im);
+            }
+            im->last_ic = ic;
+        }
+    }
 
     /* 长按 Ctrl+Alt ≥500ms → 切换录音（主循环线程，可安全调 UI） */
     if (im->armed && !im->triggered) {
@@ -377,7 +400,11 @@ static void* recv_loop(void* arg)
 
 /* ─────────────────── 引擎接口 ────────────────────────────── */
 
-static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned int state)
+/* pre-input 过滤器：任意 IM（搜狗拼音/键盘）激活时都会收到按键。
+   返回 TRUE = 消费按键（*retval 生效），FALSE = 继续交给当前 IM 与应用。
+   不消费任何普通字符键，因此拼音输入完全不受影响。 */
+static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
+                                INPUT_RETURN_VALUE* retval)
 {
     VoiceIM* im = arg;
 
@@ -389,7 +416,7 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
     im->alt_down   = !!(state & FcitxKeyState_Alt)   || is_alt(sym);
     im->shift_down = !!(state & FcitxKeyState_Shift) || is_shift(sym);
 
-    dbg_log("DoInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
+    dbg_log("filter press sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
     /* 非 Shift 键按下 → 取消"Shift 单独按下"标记 */
@@ -408,7 +435,7 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
             im->armed = true;
             clock_gettime(CLOCK_MONOTONIC, &im->press_time);
         }
-        return IRV_TO_PROCESS;
+        return false;                /* 修饰键透传：应用仍收到 Ctrl 按下 */
     }
     if (is_alt(sym)) {
         im->alt_down = true;
@@ -416,7 +443,7 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
             im->armed = true;
             clock_gettime(CLOCK_MONOTONIC, &im->press_time);
         }
-        return IRV_TO_PROCESS;
+        return false;
     }
     if (is_shift(sym)) {
         im->shift_down = true;
@@ -428,53 +455,53 @@ static INPUT_RETURN_VALUE VoiceIMDoInput(void* arg, FcitxKeySym sym, unsigned in
             im->triggered = true;    /* 防 repeat：三键松手前不再误触发录音 */
             dbg_log("三键齐按：待松手切草稿");
         }
-        return IRV_TO_PROCESS;
+        return false;
     }
 
-    /* Ctrl+Tab（Ctrl 按住、无 Alt/Shift）→ 切换录音模式 A/B */
-    if (sym == FcitxKey_Tab && im->ctrl_down && !im->alt_down && !im->recording) {
+    /* Ctrl+Alt+Tab（无 Shift）→ 切换录音模式 A/B。
+       不用裸 Ctrl+Tab：过滤器是全局的，裸 Ctrl+Tab 属于浏览器/应用的切标签键。 */
+    if (sym == FcitxKey_Tab && im->ctrl_down && im->alt_down && !im->shift_down
+        && !im->recording) {
         toggle_rec_mode(im);
-        return IRV_DO_NOTHING;   /* 消费，避免切换输入焦点 */
+        *retval = IRV_DO_NOTHING;
+        return true;
     }
 
     if (sym == FcitxKey_Escape) {
         if (im->recording && !im->esc_pressed) {
             im->esc_pressed = true;              /* 防 repeat */
             stop_and_submit(im);
-            return IRV_DO_NOTHING;
+            *retval = IRV_DO_NOTHING;
+            return true;
         }
-        if (im->recording)
-            return IRV_DO_NOTHING;               /* repeat，忽略 */
-        return IRV_TO_PROCESS;                   /* 未录音时透传给应用 */
+        if (im->recording) {
+            *retval = IRV_DO_NOTHING;            /* repeat，忽略 */
+            return true;
+        }
+        return false;                            /* 未录音时透传给应用/搜索框 */
     }
 
-    if (sym == FcitxKey_at) {
-        /* 直接提交半角 @：聊天软件（微信/企业微信等 Electron 应用）的 @ 人员
-           选择挂在 IME 提交路径上，仅透传按键（IRV_TO_PROCESS → fcitx 转发
-           原始 key 事件）不触发。@ 不在 fcitx 标点表，WidePunc 开关不影响其
-           路径，必须 commit 才能弹选人。不清 preedit：录音中的 ASR 中间结果
-           不受影响。 */
-        FcitxInputContext* ic = FcitxInstanceGetCurrentIC(im->owner);
-        if (ic) {
-            dbg_log("At 键提交: ic=%p", (void*)ic);
-            FcitxInstanceCommitString(im->owner, ic, "@");
-        }
-        return IRV_DO_NOTHING;
-    }
-
-    return IRV_TO_PROCESS;
+    /* 其余字符键一律不消费：拼音输入法照常工作。
+       （@ 也不再特判：搜狗自己会走 IME 提交路径，微信 @人 正常弹出） */
+    return false;
 }
 
-static INPUT_RETURN_VALUE VoiceIMDoReleaseInput(void* arg, FcitxKeySym sym, unsigned int state)
+/* pre-release 过滤器：与 press 对称，只跑状态机、**不消费任何释放事件**。
+   原因：press 阶段修饰键是透传的（否则 Ctrl+Alt+X 之类组合键会被抢），
+   释放若消费就会让应用/输入法看到"按下有、释放无"的不配对状态。
+   Esc 的 press 已在录音时被消费，release 透传无副作用。 */
+static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state,
+                                  INPUT_RETURN_VALUE* retval)
 {
     VoiceIM* im = arg;
+    (void)retval;
 
-    /* 与 DoInput 同：用 state 校准自维护标志，防 modifier 释放事件丢失导致状态卡死 */
+    /* 与 press 同：用 state 校准自维护标志，防 modifier 释放事件丢失导致状态卡死 */
     im->ctrl_down  = !!(state & FcitxKeyState_Ctrl)  || is_ctrl(sym);
     im->alt_down   = !!(state & FcitxKeyState_Alt)   || is_alt(sym);
     im->shift_down = !!(state & FcitxKeyState_Shift) || is_shift(sym);
 
-    dbg_log("DoReleaseInput sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
+    dbg_log("filter release sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
     if (is_ctrl(sym)) {
@@ -514,7 +541,7 @@ static INPUT_RETURN_VALUE VoiceIMDoReleaseInput(void* arg, FcitxKeySym sym, unsi
         im->triggered = false;
         im->tri_pressed = false;   /* 三键未完成（先松了 Ctrl/Alt）也清，防悬挂 */
     }
-    return IRV_DO_NOTHING;
+    return false;
 }
 
 /* 模式 B（即停）失焦时停止录音：客户端在焦点变化时会把当前 preedit 提交成
@@ -530,8 +557,8 @@ static void stop_recording_on_lost_focus(VoiceIM* im)
     }
 }
 
-/* 单独按 Ctrl+Tab → 切换录音模式（A 持续输入 ⇄ B 对讲机），上报服务端转浮窗显示。
-   不用 Shift：fcitx 里 Shift 单按被绑定为切输入法，会切走 voiceime。 */
+/* Ctrl+Alt+Tab → 切换录音模式（A 持续输入 ⇄ B 对讲机），上报服务端转浮窗显示。
+   不用裸 Ctrl+Tab：全局过滤器会抢走浏览器/应用的切标签键。 */
 static void toggle_rec_mode(VoiceIM* im)
 {
     im->mode_b = !im->mode_b;
@@ -560,61 +587,6 @@ static void stop_and_submit(VoiceIM* im)
     refresh_ui(im);
 }
 
-static void VoiceIMReset(void* arg)
-{
-    VoiceIM* im = arg;
-    stop_recording_on_lost_focus(im);
-    im->ctrl_down = false;
-    im->alt_down = false;
-    im->armed = false;
-    im->triggered = false;
-    im->esc_pressed = false;
-    clear_preedit(im);
-    refresh_ui(im);
-}
-
-static void VoiceIMOnClose(void* arg, FcitxIMCloseEventType event)
-{
-    VoiceIM* im = arg;
-    if (event == CET_SwitchIM) {
-        /* 切换输入法：停止录音并释放麦克风，上报输入法失活 */
-        send_im_active(im, 0);
-        if (im->recording) {
-            im->recording = false;
-            send_cmd(im, "{\"cmd\":\"cancel\"}");
-        }
-        VoiceIMReset(arg);
-    } else if (event == CET_ChangeByInactivate) {
-        /* fcitx 全局停用输入法（inactive 键/fcitx-remote -c）：图标回到键盘状态 */
-        send_im_active(im, 0);
-    } else {
-        /* CET_LostFocus（失焦）等：停止录音（方案 C：客户端会提交 preedit，
-           继续录音将重复输出；cancel 丢弃服务端剩余防重复） */
-        stop_recording_on_lost_focus(im);
-        clear_preedit(im);
-        refresh_ui(im);
-    }
-}
-
-static boolean VoiceIMInit(void* arg)
-{
-    VoiceIM* im = arg;
-    dbg_log("VoiceIMInit: sock=%d recv_thread=%p", im->sock, (void*)im->recv_thread);
-    if (im->sock < 0)
-        connect_service(im);
-    if (im->sock >= 0 && !im->recv_thread) {
-        im->recv_running = TRUE;
-        im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
-    }
-    if (im->owner)
-        FcitxInstanceAddTimeout(im->owner, 20, poll_queue_cb, im);   /* 主线程轮询队列 */
-    send_im_active(im, 1);   /* IM 被激活（切到语音输入法）→ 托盘显示麦克风 */
-    im->mode_b = true;       /* 默认对讲机 B：按住说、松开停（Ctrl+Tab 可切持续 A） */
-    send_cmd(im, "{\"cmd\":\"mode\",\"b\":1}");   /* 上报初始模式 → 浮窗显示 */
-    dbg_log("VoiceIMInit 完成: sock=%d recv_thread=%p", im->sock, (void*)im->recv_thread);
-    return true;
-}
-
 /* ─────────────────── 模块入口 ────────────────────────────── */
 
 static void* VoiceIMCreate(FcitxInstance* instance)
@@ -629,21 +601,29 @@ static void* VoiceIMCreate(FcitxInstance* instance)
     im->queue = g_async_queue_new();
     g_voiceim = im;
 
-    FcitxIMIFace iface;
-    memset(&iface, 0, sizeof(iface));
-    iface.Init = VoiceIMInit;
-    iface.ResetIM = VoiceIMReset;
-    iface.DoInput = VoiceIMDoInput;
-    iface.DoReleaseInput = VoiceIMDoReleaseInput;
-    iface.OnClose = VoiceIMOnClose;
-    FcitxInstanceRegisterIMv2(instance, im, "voiceime", "语音输入", "voiceime",
-                              iface, 10, "zh_CN");
+    /* 注册全局按键过滤器：不占用输入法位，拼音输入法可常驻激活 */
+    FcitxKeyFilterHook pressHook = { VoiceInputFilter, im };
+    FcitxKeyFilterHook releaseHook = { VoiceReleaseFilter, im };
+    FcitxInstanceRegisterPreInputFilter(instance, pressHook);
+    FcitxInstanceRegisterPreReleaseInputFilter(instance, releaseHook);
+
+    if (im->sock < 0)
+        connect_service(im);
+    if (im->sock >= 0) {
+        im->recv_running = TRUE;
+        im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
+    }
+    FcitxInstanceAddTimeout(im->owner, 20, poll_queue_cb, im);   /* 主线程轮询队列 */
+    send_im_active(im, 1);   /* 插件常驻 → 托盘显示麦克风 */
+    send_cmd(im, "{\"cmd\":\"mode\",\"b\":1}");   /* 上报初始模式 → 浮窗显示 */
+    dbg_log("voiceime addon 已加载: sock=%d recv_thread=%p", im->sock, (void*)im->recv_thread);
     return im;
 }
 
 static void VoiceIMDestroy(void* arg)
 {
     VoiceIM* im = arg;
+    send_im_active(im, 0);
     im->recv_running = FALSE;
     if (im->sock >= 0) {
         close(im->sock);
@@ -659,13 +639,10 @@ static void VoiceIMDestroy(void* arg)
     free(im);
 }
 
-FCITX_DEFINE_PLUGIN(fcitx_voiceime, ime2, FcitxIMClass2) = {
+FCITX_DEFINE_PLUGIN(fcitx_voiceime, module, FcitxModule) = {
     VoiceIMCreate,
+    NULL,   /* SetFD */
+    NULL,   /* ProcessEvent */
     VoiceIMDestroy,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL
+    NULL    /* ReloadConfig */
 };

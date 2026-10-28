@@ -5,7 +5,7 @@
 
 ## 1. 这是什么
 
-ZTE 内网环境的语音输入法：**按住 Ctrl+Alt 说话 → 松开即停上屏（对讲机）；豆包流式 ASR 识别 → 可选 LLM 润色 → 文本提交到当前输入光标**（fcitx 输入法引擎，不碰剪贴板）。包含 4 个 systemd 用户服务：core（主服务）、osd（录音浮窗）、draft（草稿窗）、web（配置台）。
+ZTE 内网环境的语音输入插件：**按住 Ctrl+Alt 说话 → 松开即停上屏（对讲机）；豆包流式 ASR 识别 → 可选 LLM 润色 → 文本提交到当前输入光标**（fcitx 4 Module addon，注册全局按键过滤器，**不占输入法位**；不碰剪贴板）。拼音输入法（搜狗）可常驻激活，打字与语音并存、无需来回切换。包含 4 个 systemd 用户服务：core（主服务）、osd（录音浮窗）、draft（草稿窗）、web（配置台）。
 
 ## 2. 前置条件
 
@@ -99,9 +99,10 @@ systemctl --user restart voiceime-core
 # 1. 4 服务全 active
 systemctl --user is-active voiceime-core voiceime-osd voiceime-draft voiceime-web
 
-# 2. 引擎已注册（切换输入法激活 voiceime）
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
-fcitx-remote -s voiceime
+# 2. 插件已加载（fcitx 启动时的 addon，不是输入法）
+grep 'addon 已加载' logs/voiceime-engine.log
+# 应无输出（voiceime 已不是输入法，返回空即正常）
+fcitx-remote -m voiceime
 
 # 3. 引擎已连接 core（1 条 ESTAB）
 ss -x | grep voiceime
@@ -116,10 +117,10 @@ curl -s http://127.0.0.1:19530/api/state | head -c 200
 
 | 操作 | 行为 |
 |---|---|
-| 切换「语音输入」 | fcitx 托盘/切换键 |
+| 输入法 | 保持拼音输入法（搜狗）即可，插件不占输入法位；**无需切换** |
 | **按住 Ctrl+Alt ≥0.3s** | 开始录音（提示音 + 浮窗声波） |
 | **松开 Ctrl/Alt** | B 对讲机（默认）：停止并上屏 |
-| **Ctrl+Tab** | 切换 A 持续 / B 对讲机模式 |
+| **Ctrl+Alt+Tab** | 切换 A 持续 / B 对讲机模式 |
 | A 持续模式按 **Escape** | 停止并提交剩余文本 |
 | 录音中单按 Ctrl（A）/ 空闲 Ctrl+Alt+Shift（B） | 切换草稿模式（内容进草稿窗） |
 | 说话 | 停顿 500ms 自动定稿；`auto_polish` 开则先润色再上屏 |
@@ -145,8 +146,8 @@ tail -f logs/voiceime-osd.log       # 浮窗
 
 | 症状 | 排查 |
 |---|---|
-| fcitx 无「语音输入」 | 引擎未加载：`ls /usr/lib64/fcitx/fcitx-voiceime.so` → 重启 fcitx（3.5） |
-| 按 Ctrl+Alt 无反应 | 当前 IM 非 voiceime；core 未运行 |
+| 按 Ctrl+Alt 无反应 | ① fcitx 未激活：`fcitx-remote` 返回 2 才生效，`fcitx-remote -o` 激活；② 插件未加载：看 `logs/voiceime-engine.log` 是否有「addon 已加载」；③ core 未运行 |
+| 日志无「addon 已加载」 | 重启 fcitx（3.5）；确认 `/usr/lib64/fcitx/fcitx-voiceime.so` 与 `/usr/share/fcitx/addon/fcitx-voiceime.conf`（`Category=Module`）；`logs/` 目录须存在（install.sh 会建） |
 | 识别报错/无结果 | 豆包 key 空/错；网络不通；看 core 日志 `ASR` 行 |
 | 润色失败频繁 | 看日志「润色失败，提交原文」；key 失效/模型到期/超时 8s；配置台切换模型 |
 | 润色不生效 | `llm.auto_polish` 未开；active 模型 key 无效 |

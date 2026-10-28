@@ -34,7 +34,8 @@ if command -v fcitx-remote >/dev/null 2>&1; then
     state=$(fcitx-remote 2>/dev/null)
     case "$state" in
         0) info "fcitx 未运行（安装后需启动 fcitx）" ;;
-        1|2) ok "fcitx 正在运行（状态 $state）" ;;
+        1) info "fcitx 运行中但输入法未激活（按 Ctrl+Space 激活；未激活时语音与拼音都不生效）" ;;
+        2) ok "fcitx 正在运行（状态 2：已激活）" ;;
         *) info "fcitx 状态未知（fcitx-remote 返回: $state）" ;;
     esac
 else

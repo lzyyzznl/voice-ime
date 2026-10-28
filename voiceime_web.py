@@ -424,7 +424,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <div class="f"><label for="api_key">API Key</label>
         <div class="pw"><input type="password" id="api_key" autocomplete="off" spellcheck="false"><button class="eye" id="eyeKey" type="button">显示</button></div></div>
     </div>
-    <p class="card-desc" style="margin:12px 0 0">流式端点与计费项已固定为最优组合：按住说话走单向整句识别、持续对话走双向边说边出，资源按 2.0 时长版。需要改动时改 <code>config.json</code>。</p>
+    <p class="card-desc" style="margin:12px 0 0">流式端点与计费项已固定为最优组合：单向整句识别，每 12 秒自动无缝续接（服务端单次会话只认前约 15 秒音频），资源按 2.0 时长版。需要改动时改 <code>config.json</code>。</p>
     <p class="card-desc" style="margin:16px 0 10px">识别参数<span style="color:var(--faint)"> · 默认值即豆包文档推荐，一般无需改</span></p>
     <div class="subgrid">
       <label class="sw"><input type="checkbox" id="enable_punc"><span class="tr"></span><span class="n">标点</span><span class="d">enable_punc</span></label>

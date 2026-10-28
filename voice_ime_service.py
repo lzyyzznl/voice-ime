@@ -383,6 +383,7 @@ class VoiceIMEService:
             self.recent = []            # 已上屏句子的原文（润色上下文，最多 CONTEXT_N 句）
             self.cancel_pending = False # 启动握手期收到 stop（对讲机松开）：握手完成后自停
             self.stopping = False       # stop 已开始：on_final 停止即时提交，由 stop 统一收尾
+            self.switching = False      # 正在换代续录：stop 需等它结束再收尾，否则缓存音频无人消费
 
     def _make_asr(self, session):
         """按 config.asr_backend 构造 ASR 客户端（icenter/doubao），回调接口一致"""
@@ -391,18 +392,15 @@ class VoiceIMEService:
                     lambda p: self.on_final(session, p))
         if self.cfg.get("asr_backend", "doubao") == "doubao":
             d = self.cfg.get("doubao") or {}
-            # 端点固定最优：按住说话（即停 B）走单向整句最准，持续对话走双向
-            # 边说边出。config 的 doubao.url 仅作逃生口（"nostream"=全单向，
-            # 其他=全双向），配置台不再暴露。
-            url_cfg = d.get("url") or "by_mode"
-            use_nostream = (url_cfg == "nostream") or (url_cfg == "by_mode" and self._mode_b)
-            kwargs = {"url": URL_NOSTREAM} if use_nostream else {}
+            # 端点固定单向（bigmodel_nostream）：实测双向 async 端点在 12~14s
+            # 的短段上有一半概率返回空（二遍 VAD 未触发，整段丢弃），不可用；
+            # 单向端点稳定。长度上限由 _rotate_sec() 的 12s 无缝切换兜住。
             return DoubaoASR(
                 api_key=d.get("api_key", ""),
                 resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
                 request=d.get("request"),
                 sample_rate=self.cfg.get("sample_rate", 16000),
-                **kwargs,
+                url=URL_NOSTREAM,
             ).start(*_cbs())
         # iCenter（公司自有模型）：优先 config.icenter 段，缺省回退顶层老键（兼容旧配置）
         ic = self.cfg.get("icenter") or {}
@@ -589,10 +587,10 @@ class VoiceIMEService:
         # ASR 握手放后台：慢连接不再冻结控制通道（模式/草稿/cancel 照常响应）
         threading.Thread(target=self._attach_asr, args=(session, gen), daemon=True).start()
         # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
-        # 60s 上限（iCenter 单次会话限制）：静默切换 ASR 会话续录，
+        # 单次会话上限（豆包约 15s / iCenter 60s）：静默切换 ASR 会话续录，
         # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
         def auto_stop():
-            time.sleep(60)
+            time.sleep(self._rotate_sec())
             self.switch_session(session, gen)
         threading.Thread(target=auto_stop, daemon=True).start()
 
@@ -651,8 +649,17 @@ class VoiceIMEService:
                                  args=(session, gen, False, True), daemon=True).start()
                 return
 
+    def _rotate_sec(self):
+        """单次 ASR 会话的音频上限（留安全余量）。
+
+        豆包流式识别单次会话只认前约 15 秒音频：实测送 29.5s，
+        nostream 端点返回全空、async 端点只返回前 14.7s 的内容，
+        超出部分静默丢弃 —— 所以必须在 15s 前主动换代续录。
+        iCenter 的限制是 60s。"""
+        return 12 if self.cfg.get("asr_backend", "doubao") == "doubao" else 60
+
     def switch_session(self, session, gen):
-        """60s 上限：旧会话停止提交 → 新会话接管同一录音流（无缝续录）"""
+        """会话上限到期：旧会话停止提交 → 新会话接管同一录音流（无缝续录）"""
         with session.lock:
             if session.generation != gen or session.asr is None:
                 return
@@ -666,72 +673,94 @@ class VoiceIMEService:
             old_asr = session.asr
             session.asr = None
             session.rec.route_to(None)   # 切换窗口：音频进缓存
+            session.switching = True
         try:
-            finals = old_asr.stop(timeout=5)      # 旧会话收尾（0.6s 内）
-        except Exception as e:
-            log.warning("旧会话收尾异常: %s", e)
-            finals = []
-        # stop 返回前 on_final 已同步处理完 finals（completed 在其后置位），重读最新
-        # committed；若在 stop 前读旧值，on_final 刚提交的句会被 rem 再次提交 → 重复
-        with session.lock:
-            old_committed = session.committed
-        rem = "".join(finals[old_committed:]).strip()
-        if not rem:
-            # 兜底：服务端未返回 final（如切换瞬间仍在说话）时用累积 interim 文本
+            try:
+                finals = old_asr.stop(timeout=5)      # 旧会话收尾（0.6s 内）
+            except Exception as e:
+                log.warning("旧会话收尾异常: %s", e)
+                finals = []
+            # stop 返回前 on_final 已同步处理完 finals（completed 在其后置位），重读最新
+            # committed；若在 stop 前读旧值，on_final 刚提交的句会被 rem 再次提交 → 重复
             with session.lock:
-                rem = (session.last_interim_text or "").strip()
-        log.info("会话切换：旧会话提交 %r（finals %d 句）", rem, len(finals) - old_committed)
-        if rem:
-            if session.drafting:
-                self._draft_send({"type": "text", "mode": "final", "text": rem})
+                old_committed = session.committed
+            rem = "".join(finals[old_committed:]).strip()
+            if not rem:
+                # 兜底：服务端未返回 final（如切换瞬间仍在说话）时用累积 interim 文本
+                with session.lock:
+                    rem = (session.last_interim_text or "").strip()
+            log.info("会话切换：旧会话提交 %r（finals %d 句）", rem, len(finals) - old_committed)
+            if rem:
+                if session.drafting:
+                    self._draft_send({"type": "text", "mode": "final", "text": rem})
+                else:
+                    self._commit_text(session, rem)   # 自动润色开启时先润色再上屏
+                    # 等上屏再发 done：紧随其后要发 started（续录），顺序颠倒会让
+                    # 引擎先置 recording=true 再被旧 done 复位
+                    session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
+                session.send({"type": "done", "ok": True})
             else:
-                self._commit_text(session, rem)   # 自动润色开启时先润色再上屏
-                # 等上屏再发 done：紧随其后要发 started（续录），顺序颠倒会让
-                # 引擎先置 recording=true 再被旧 done 复位
-                session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
-            session.send({"type": "done", "ok": True})
-        else:
-            session.send({"type": "done", "ok": bool("".join(finals).strip())})
-        # 引擎收到 done 复位 recording，再发 started 置回 true（顺序保证状态一致）
-        try:
-            new_asr = self._make_asr(session)
-        except Exception as e:
-            log.error("60s 续录失败: %s", e)
-            if session.drafting:
-                self._draft_send({"type": "text", "mode": "interim", "text": f"续录失败: {e}"})
-            else:
-                session.send({"type": "preedit", "text": f"续录失败: {e}"})
-            # 续录失败 = 会话死亡：收尾并复位引擎状态（换代已提前，必须用
-            # new_gen 主动终止，旧代际的停止请求会被拒绝）
-            threading.Thread(target=self.stop_session,
-                             args=(session, new_gen, False), daemon=True).start()
-            return
-        with session.lock:
-            if session.rec is None or session.generation != new_gen:
-                # 空窗期会话已被停止（静音/ESC/cancel）或已重新 start：
-                # 丢弃新 ASR，保持当前状态，不复活会话
-                log.info("60s 切换：会话已停止/换代，丢弃新 ASR")
-                try:
-                    new_asr.close()
-                except Exception:
-                    pass
+                session.send({"type": "done", "ok": bool("".join(finals).strip())})
+            # 引擎收到 done 复位 recording，再发 started 置回 true（顺序保证状态一致）
+            try:
+                new_asr = self._make_asr(session)
+            except Exception as e:
+                log.error("续录失败: %s", e)
+                if session.drafting:
+                    self._draft_send({"type": "text", "mode": "interim", "text": f"续录失败: {e}"})
+                else:
+                    session.send({"type": "preedit", "text": f"续录失败: {e}"})
+                # 续录失败 = 会话死亡：收尾并复位引擎状态（换代已提前，必须用
+                # new_gen 主动终止，旧代际的停止请求会被拒绝）
+                threading.Thread(target=self.stop_session,
+                                 args=(session, new_gen, False), daemon=True).start()
                 return
-            session.asr = new_asr
-            session.committed = 0
-            session.last_interim_text = ""   # 新会话从零累积，防重复提交
-        session.rec.route_to(new_asr)     # 接管：先补发缓存音频再实时
-        session.rec.flush_pending()
-        session.send({"type": "started"})
-        def next_switch():
-            time.sleep(60)
-            self.switch_session(session, new_gen)
-        threading.Thread(target=next_switch, daemon=True).start()
+            with session.lock:
+                if session.rec is None or session.generation != new_gen:
+                    # 空窗期会话已被停止（静音/ESC/cancel）或已重新 start：
+                    # 丢弃新 ASR，保持当前状态，不复活会话
+                    log.info("切换：会话已停止/换代，丢弃新 ASR")
+                    try:
+                        new_asr.close()
+                    except Exception:
+                        pass
+                    return
+                session.asr = new_asr
+                session.committed = 0
+                session.last_interim_text = ""   # 新会话从零累积，防重复提交
+            session.rec.route_to(new_asr)     # 接管：先补发缓存音频再实时
+            session.rec.flush_pending()
+            session.send({"type": "started"})
+            def next_switch():
+                time.sleep(self._rotate_sec())
+                self.switch_session(session, new_gen)
+            threading.Thread(target=next_switch, daemon=True).start()
+        finally:
+            with session.lock:
+                session.switching = False
 
     def stop_session(self, session, gen=None, beep=True, drop=False):
         """停止录音并提交剩余文本；drop=True 时丢弃剩余（不提交，focus_lost_stop 自动停用）"""
         with session.lock:
             if gen is not None and session.generation != gen:
                 return False   # 旧代际的定时器到期，会话已换代，忽略
+            rec0 = session.rec
+        # 会话切换/握手空窗期（asr 尚未挂上、rec 仍在录音）：此刻收尾会让这一轮
+        # 缓存的音频没人消费而丢失（实测松手正好撞上 12s 切换 → 整段不上屏）。
+        # 以"rec 是否还是同一条录音流"判断会话归属：切换会换代但 rec 不变，
+        # 只有真正的新一轮 start/已收尾才换 rec。等新 ASR 挂上再正常收尾，
+        # 最多 3s，避免引擎长时间卡在录音态。
+        deadline = time.time() + 3
+        while rec0 is not None and time.time() < deadline:
+            with session.lock:
+                if session.switching:
+                    pass            # 换代续录进行中：等它挂上新 ASR 再收尾
+                elif session.rec is not rec0 or session.asr is not None:
+                    break
+            time.sleep(0.05)
+        with session.lock:
+            if session.rec is not rec0:
+                return False       # 已被另一路 stop 收尾，或新一轮录音已接管
             rec, asr = session.rec, session.asr
             session.rec = None
             session.asr = None

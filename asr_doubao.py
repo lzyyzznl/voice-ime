@@ -27,11 +27,9 @@ from websockets.sync.client import connect
 
 log = logging.getLogger("asr-doubao")
 
-# 双向流式优化版端点：官方推荐，只在结果变化时回包；只有它支持 enable_nonstream
-# 二遍识别（VAD 分句 → 每句用非流式重识别 → definite 定稿）。旧版 bigmodel 不支持
-# 二遍，实测在该账号下连文本都不返回，故不再使用。
-URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
-# 流式输入端点（整句返回，准确率更高）
+# 流式输入端点：整段音频（≤15s）在流末一次性返回全部定稿句，准确率最高。
+# 双向流式（bigmodel / bigmodel_async）实测在该账号下不稳定（短段常返回空），
+# 故不使用。
 URL_NOSTREAM = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
 
 _HEADER = b"\x11"          # version=1, header_size=1(块)
@@ -52,10 +50,10 @@ class DoubaoASR:
     """单次录音会话的豆包流式转写客户端（同步模型，与 StreamingASR 一致）。"""
 
     def __init__(self, api_key, resource_id="volc.seedasr.sauc.duration",
-                 url=URL, sample_rate=16000, sample_width=2, request=None):
+                url=URL_NOSTREAM, sample_rate=16000, sample_width=2, request=None):
         self.api_key = api_key
         self.resource_id = resource_id
-        self.url = url or URL          # None/空 → 双向流式端点
+        self.url = url or URL_NOSTREAM
         self.sample_rate = sample_rate
         self.sample_width = sample_width
         self.request_overrides = request or {}   # config.doubao.request 覆盖默认参数

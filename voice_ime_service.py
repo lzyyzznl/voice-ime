@@ -677,6 +677,8 @@ class VoiceIMEService:
         try:
             try:
                 finals = old_asr.stop(timeout=5)      # 旧会话收尾（0.6s 内）
+                if getattr(old_asr, "_error", None):
+                    log.warning("ASR 错误（服务端返回）: %s", old_asr._error)
             except Exception as e:
                 log.warning("旧会话收尾异常: %s", e)
                 finals = []

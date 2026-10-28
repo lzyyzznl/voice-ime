@@ -695,13 +695,11 @@ class VoiceIMEService:
                     self._draft_send({"type": "text", "mode": "final", "text": rem})
                 else:
                     self._commit_text(session, rem)   # 自动润色开启时先润色再上屏
-                    # 等上屏再发 done：紧随其后要发 started（续录），顺序颠倒会让
-                    # 引擎先置 recording=true 再被旧 done 复位
                     session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
-                session.send({"type": "done", "ok": True})
-            else:
-                session.send({"type": "done", "ok": bool("".join(finals).strip())})
-            # 引擎收到 done 复位 recording，再发 started 置回 true（顺序保证状态一致）
+            # 这里不能发 done/started 给引擎：done 会复位 recording 和所有修饰键
+            # 标志，用户仍按着触发键时引擎会以为已松手，之后真松手不再发 stop
+            # （会话卡到静音超时），浮窗也会闪一下。续录期间录音流没断，引擎
+            # 状态无需改动。
             try:
                 new_asr = self._make_asr(session)
             except Exception as e:
@@ -730,7 +728,6 @@ class VoiceIMEService:
                 session.last_interim_text = ""   # 新会话从零累积，防重复提交
             session.rec.route_to(new_asr)     # 接管：先补发缓存音频再实时
             session.rec.flush_pending()
-            session.send({"type": "started"})
             def next_switch():
                 time.sleep(self._rotate_sec())
                 self.switch_session(session, new_gen)

@@ -73,7 +73,7 @@ def record_history(orig, text, polished=False, fallback=False, ms=0):
 class Recorder(threading.Thread):
     def __init__(self, sample_rate, chunk_bytes, device="default",
                  silence_timeout_sec=0, on_silence=None, rms_threshold=300,
-                 silence_after_input_sec=0, on_rms=None):
+                 silence_after_input_sec=0, on_rms=None, on_send_fail=None):
         super().__init__(daemon=True, name="recorder")
         self.sample_rate = sample_rate
         self.chunk_bytes = chunk_bytes
@@ -86,6 +86,8 @@ class Recorder(threading.Thread):
         self.rms_threshold = rms_threshold
         self.silence_after_input_sec = silence_after_input_sec
         self.on_rms = on_rms          # 每 chunk 回调 RMS（浮窗声波动画用）
+        self.on_send_fail = on_send_fail   # 发送线程发现连接已断时回调（触发续接）
+        self._fail_fired = False
         self._silence_ms = 0
         self._heard_speech = False   # 是否已识别到有声（说过话后放宽静音阈值）
         # 音频路由：chunk → 当前 ASR 连接；切换窗口（无目标/发送失败）→ 缓存待补发
@@ -103,6 +105,7 @@ class Recorder(threading.Thread):
         """切换音频发送目标（None = 缓存模式，等待新连接接管）"""
         with self._route_lock:
             self._target = target
+        self._fail_fired = False      # 新目标接管：复位断线标记，允许再次触发续接
         with self._buf_cv:
             self._buf_cv.notify_all()
 
@@ -140,6 +143,12 @@ class Recorder(threading.Thread):
                 self._buf.popleft()
             if not ok:
                 log.warning("音频发送失败(连接已断),丢弃 1 包")
+                if self.on_send_fail and not self._fail_fired:
+                    self._fail_fired = True
+                    try:
+                        self.on_send_fail()
+                    except Exception as e:
+                        log.warning("断线续接回调异常: %s", e)
 
     def run(self):
         if self.device == "default":
@@ -594,6 +603,12 @@ class VoiceIMEService:
                 threading.Thread(target=self.stop_session,
                                  args=(session,), daemon=True).start()
 
+            def on_send_fail():
+                # 发送线程发现连接已断：立即换代续接（不等 300s 兜底轮换，
+                # 否则这一整次说话全丢）。回调在 sender 线程内，起独立线程切换。
+                threading.Thread(target=self.switch_session,
+                                 args=(session, session.generation), daemon=True).start()
+
             # 先起录音流（parec 本地启动，毫秒级）：ASR 握手期的音频进缓存，
             # 握手完成即刻补发——用户按下就能开口，不必等 WebSocket 建连
             rec = Recorder(self.cfg["sample_rate"], chunk_bytes,
@@ -602,11 +617,11 @@ class VoiceIMEService:
                            on_silence=on_silence if silence_sec > 0 else None,
                            rms_threshold=rms_threshold,
                            silence_after_input_sec=after_input_sec,
-                           on_rms=self._on_rms)
+                           on_rms=self._on_rms,
+                           on_send_fail=on_send_fail)
             rec.start()
             rec.route_to(None)     # 暂存音频，等 ASR 接管后 flush_pending 补发
             session.rec = rec
-            session.send({"type": "started"})   # 引擎据此同步 recording=true（锁内发，防窗口竞态）
         if not silent:
             _play_beep(BEEP_START)   # 提示音不等握手：按下即响
         with self.clients_lock:

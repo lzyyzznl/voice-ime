@@ -27,9 +27,11 @@ from websockets.sync.client import connect
 
 log = logging.getLogger("asr-doubao")
 
-# 双向流式端点（interim 实时 + enable_nonstream 定稿）
-URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel"
-# 整句返回端点（备用）
+# 双向流式优化版端点：官方推荐，只在结果变化时回包；只有它支持 enable_nonstream
+# 二遍识别（VAD 分句 → 每句用非流式重识别 → definite 定稿）。旧版 bigmodel 不支持
+# 二遍，实测在该账号下连文本都不返回，故不再使用。
+URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+# 流式输入端点（整句返回，准确率更高）
 URL_NOSTREAM = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
 
 _HEADER = b"\x11"          # version=1, header_size=1(块)

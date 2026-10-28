@@ -432,7 +432,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <div class="f"><label for="url">流式端点</label>
         <select id="url">
           <option value="nostream">单向流式 bigmodel_nostream（整句、准确率更优，推荐）</option>
-          <option value="">双向流式 bigmodel（实时预览、准确率较低）</option>
+          <option value="">双向流式 bigmodel_async（边说边出、逐句定稿，需开二遍）</option>
         </select></div>
     </div>
     <p class="card-desc" style="margin:16px 0 10px">识别参数<span style="color:var(--faint)"> · 默认值即豆包文档推荐，一般无需改</span></p>

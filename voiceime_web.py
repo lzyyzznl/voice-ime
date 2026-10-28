@@ -374,7 +374,6 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
           <option value="gray">gray · 灰度</option>
           <option value="test">test · 测试</option>
         </select></div>
-      <div class="f"><label for="ic_url">服务地址（可选，覆盖 env）</label><input type="text" id="ic_url" spellcheck="false" placeholder="wss://… 留空则按 env 取默认"></div>
       <div class="f"><label for="ic_app_id">App ID</label><input type="text" id="ic_app_id" spellcheck="false"></div>
       <div class="f"><label for="ic_source">Source</label><input type="text" id="ic_source" spellcheck="false"></div>
     </div>
@@ -518,7 +517,6 @@ const getPath = (o, p) => { let t = o; for (const k of p.split(".")) { if (t == 
 const FIELD = [
   ["asr_backend",  "asr_backend", "s"],
   ["ic_env",       "icenter.env", "s"],
-  ["ic_url",       "icenter.url", "s"],
   ["ic_app_id",    "icenter.app_id", "s"],
   ["ic_source",    "icenter.source", "s"],
   ["ic_user_id",   "icenter.user_id", "s"],
@@ -628,7 +626,6 @@ function fillForm(cfg){
   const ic = cfg.icenter || {};
   cfg.icenter = {
     env:      ic.env || cfg.env || "prod",
-    url:      ic.url || "",
     app_id:   ic.app_id || cfg.app_id || "",
     source:   ic.source || cfg.source || "",
     user_id:  ic.user_id || cfg.user_id || "",

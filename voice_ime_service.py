@@ -533,9 +533,9 @@ class VoiceIMEService:
             # （此前这里立即清空会让润色等待期候选栏空白 0.3-2s）
 
     def start_session(self, session, silent=False):
-        # ── 锁快路径：仅毫秒级状态重置，绝不在此持锁做网络握手 ──
+        # ── 锁快路径：只做本地装配（毫秒级），网络握手交给后台线程 ──
         with session.lock:
-            if session.asr:
+            if session.asr or session.rec:
                 return   # 已在录音（浮窗持续指示中）
             session.cancel_pending = False   # 新 start 清除历史取消标记
             session.stopping = False
@@ -545,47 +545,8 @@ class VoiceIMEService:
             # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
             session.recent = []
             # 长按触发即显示浮窗：浮窗出现 = 可开始说话
-            # （服务端已收到 start 命令，引擎↔服务端连接就绪；ASR 握手期音频缓存补发）
             self._osd_send({"type": "show"})
-        # ── 锁外建立 ASR（网络握手，可能数百 ms~数秒）。stop 分支（handle）也需要取
-        #    session.lock 置 cancel_pending；锁内握手会让 client_loop 阻塞在握手上，
-        #    慢/挂起的 doubao 连接会冻结整个控制通道（模式/草稿/激活全无响应）──
-        try:
-            asr = self._make_asr(session)
-        except Exception as e:
-            log.error("ASR 启动失败: %s", e)
-            self._osd_send({"type": "stop"})   # 隐藏浮窗，避免"可说话"误导
-            if session.drafting:
-                self._draft_send({"type": "text", "mode": "interim", "text": f"ASR 失败: {e}"})
-            else:
-                session.send({"type": "preedit", "text": f"ASR 失败: {e}"})
-            session.send({"type": "done", "ok": False})
-            return
-        # ── 锁内：取消检查 + 挂接 ASR + 装配录音流，与 stop/cancel_session 串行 ──
-        with session.lock:
-            # 对讲机模式：握手期间用户已松开（stop 先于 started 到达）→ 放弃本次录音
-            if session.cancel_pending:
-                session.cancel_pending = False
-                log.info("握手期收到 stop（松开过早），放弃本次录音")
-                try:
-                    asr.close()
-                except Exception:
-                    pass
-                self._osd_send({"type": "stop"})
-                session.send({"type": "done", "ok": False})
-                return
-            # 并发 start 已在本握手期间 attach（新会话已接管）：丢本次结果
-            if session.asr is not None:
-                log.info("并发 start 接管，丢弃握手结果")
-                try:
-                    asr.close()
-                except Exception:
-                    pass
-                return
-            session.asr = asr
-            # ── 以下装配必须与原 asr 挂接在同一锁块内（毫秒级）：若放锁外，
-            #    stop 在放锁后、started 前到达会先停掉已挂的 asr/rec，随后本处
-            #    再发 started → 引擎 recording=true 但录音流已死，会话卡住 ──
+
             chunk_bytes = self.cfg["sample_rate"] * 2 * self.cfg.get("chunk_ms", 200) // 1000
             silence_sec = int(self.cfg.get("silence_timeout_sec", 15) or 0)
             rms_threshold = int(self.cfg.get("silence_rms_threshold", 300))
@@ -604,22 +565,26 @@ class VoiceIMEService:
                 threading.Thread(target=self.stop_session,
                                  args=(session,), daemon=True).start()
 
-            session.rec = Recorder(self.cfg["sample_rate"], chunk_bytes,
-                                   self.cfg.get("audio_device", "default"),
-                                   silence_timeout_sec=silence_sec,
-                                   on_silence=on_silence if silence_sec > 0 else None,
-                                   rms_threshold=rms_threshold,
-                                   silence_after_input_sec=after_input_sec,
-                                   on_rms=self._on_rms)
-            session.rec.start()
-            session.rec.route_to(asr)      # 录音 → 当前 ASR（启动窗口的音频已缓存，接管后补发）
-            session.rec.flush_pending()
+            # 先起录音流（parec 本地启动，毫秒级）：ASR 握手期的音频进缓存，
+            # 握手完成即刻补发——用户按下就能开口，不必等 WebSocket 建连
+            rec = Recorder(self.cfg["sample_rate"], chunk_bytes,
+                           self.cfg.get("audio_device", "default"),
+                           silence_timeout_sec=silence_sec,
+                           on_silence=on_silence if silence_sec > 0 else None,
+                           rms_threshold=rms_threshold,
+                           silence_after_input_sec=after_input_sec,
+                           on_rms=self._on_rms)
+            rec.start()
+            rec.route_to(None)     # 暂存音频，等 ASR 接管后 flush_pending 补发
+            session.rec = rec
             session.send({"type": "started"})   # 引擎据此同步 recording=true（锁内发，防窗口竞态）
         if not silent:
-            _play_beep(BEEP_START)
+            _play_beep(BEEP_START)   # 提示音不等握手：按下即响
         with self.clients_lock:
             self._rec_count += 1
         self._tray_state()
+        # ASR 握手放后台：慢连接不再冻结控制通道（模式/草稿/cancel 照常响应）
+        threading.Thread(target=self._attach_asr, args=(session, gen), daemon=True).start()
         # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
         # 60s 上限（iCenter 单次会话限制）：静默切换 ASR 会话续录，
         # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
@@ -632,6 +597,36 @@ class VoiceIMEService:
         if self.cfg.get("focus_lost_stop", False) and self._xfocus.current() is not None:
             threading.Thread(target=self._watch_focus,
                              args=(session, gen), daemon=True).start()
+
+    def _attach_asr(self, session, gen):
+        """后台建立 ASR，完成后接管已在录音的音频流（缓存先行，内容零丢失）"""
+        with session.lock:
+            if session.generation != gen or session.rec is None:
+                return      # 还没开始握手，会话就被停止/换代了
+        try:
+            asr = self._make_asr(session)
+        except Exception as e:
+            log.error("ASR 启动失败: %s", e)
+            if session.drafting:
+                self._draft_send({"type": "text", "mode": "interim", "text": f"ASR 失败: {e}"})
+            else:
+                session.send({"type": "preedit", "text": f"ASR 失败: {e}"})
+            # 录音已在跑：按停止收尾并复位引擎，避免浮窗卡在录音态
+            threading.Thread(target=self.stop_session, args=(session, gen, False),
+                             daemon=True).start()
+            return
+        with session.lock:
+            if session.generation != gen or session.rec is None:
+                log.info("握手期会话已停止（松开过早），丢弃 ASR")
+                try:
+                    asr.close()
+                except Exception:
+                    pass
+                return
+            session.asr = asr
+            rec = session.rec
+        rec.route_to(asr)      # 接管：先补发缓存音频，再实时发送
+        rec.flush_pending()
 
     def _watch_focus(self, session, gen):
         """录音期间轮询 X 焦点；焦点离开启动窗口 → 自动停止（丢弃剩余，避免提交到新窗口）"""

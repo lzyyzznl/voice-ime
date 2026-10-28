@@ -31,8 +31,8 @@ FG = (0.31, 0.82, 1.0, 1.0)           # 声波条/描边/外发光青蓝
 BAR_N = 9
 BAR_W = 6
 BAR_GAP = 12
-BAR_MAX_H = 24
-BAR_MIN_H = 5
+BAR_MAX_H = 28
+BAR_MIN_H = 2
 TIMEOUT_MS = 800                      # 无数据自动隐藏
 SMOOTH = 0.28                         # RMS 平滑系数（避免声波剧烈抖动）
 
@@ -89,6 +89,7 @@ class OSD:
         self.mode_b = False     # 录音模式：False=持续输入(A) 声波青蓝 / True=即停(B) 声波橙色
         self.polish_state = None   # LLM 润色状态：None=空闲 / 'on'=润色中 / 'fail'=润色失败（短暂红后恢复）
         self.polish_until = 0.0    # fail 状态的自动恢复时刻（monotonic）
+        self.peak = 1.0            # 自适应峰值：不同麦克风电平下都能看出起伏
         GLib.timeout_add(40, self.tick)
 
     def reposition(self):
@@ -144,6 +145,9 @@ class OSD:
             self.polish_state = None                  # 失败红 1.5s 后自动恢复默认色
         if self.visible:
             self.display_rms += (self.target_rms - self.display_rms) * SMOOTH
+            # 峰值慢衰减（约 1 秒半衰期）：只看相对音量，绝对电平极低的麦克风
+            # （实测 RMS 只有 20~50）也能拉出满幅摆动，静音时回落到近零
+            self.peak = max(self.target_rms, self.peak * 0.97, 1.0)
             self.da.queue_draw()
         return True
 
@@ -201,7 +205,10 @@ class OSD:
         cr.stroke()
         # 声波条：高度随 RMS，轻微相位差 → 波纹效果
         rms = self.display_rms
-        base = BAR_MIN_H + min(rms / 300.0, 1.0) * (BAR_MAX_H - BAR_MIN_H) * 0.75
+        # 相对当前峰值归一化：有声时接近满幅，静音时回落成一条细线——两者一眼可辨，
+        # 且不依赖麦克风绝对电平（实测环境 RMS 只有 20~50，固定 /300 几乎看不出起伏）
+        norm = min(1.0, max(0.0, rms) / self.peak) ** 0.7
+        base = BAR_MIN_H + norm * (BAR_MAX_H - BAR_MIN_H)
         cy = ah / 2
         t = time.monotonic() * 4.0
         bar_area_w = BAR_N * BAR_W + (BAR_N - 1) * BAR_GAP

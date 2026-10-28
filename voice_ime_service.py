@@ -776,6 +776,8 @@ class VoiceIMEService:
             rec.stop_and_drain()
         self._osd_send({"type": "stop"})
         finals = asr.stop(timeout=5) if asr else []
+        if asr is not None and getattr(asr, "_error", None):
+            log.warning("ASR 错误（服务端返回）: %s", asr._error)
         # asr.stop() 阻塞期间 recv 线程仍可能处理迟到 final 并调 on_final；此时
         # stopping=True 已挡掉即时提交。但 committed 必须读 asr.stop 返回后的最新值：
         # 若在 stop 前读（旧值），on_final 已提交的句会被 remaining 再次覆盖 → 重复

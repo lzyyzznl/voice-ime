@@ -68,6 +68,9 @@ def record_history(orig, text, polished=False, fallback=False, ms=0):
         log.warning("写输入历史失败: %s", e)
 
 
+BUF_MAX = 16   # 队列上限：16×200ms ≈ 3.2s。预热流空闲时也入队，必须有界，否则常驻占内存
+
+
 # ── 录音：parec → 200ms 分片 → 路由到当前 ASR ──────────────
 class Recorder(threading.Thread):
     def __init__(self, sample_rate, chunk_bytes, device="default",
@@ -79,6 +82,7 @@ class Recorder(threading.Thread):
         self.device = device
         self._proc = None
         self._stop_evt = threading.Event()
+        self.ready_evt = threading.Event()   # 首块音频到达（parec 冷启动约 1.1s，见 _ensure_warm）
         # 静音超时自动停止（0 = 禁用）
         self.silence_timeout_sec = silence_timeout_sec
         self.on_silence = on_silence
@@ -96,9 +100,9 @@ class Recorder(threading.Thread):
         # 网络阻塞只卡发送线程，录音照常读取——否则 parec 管道积压、音频丢失，
         # 且发包间隔超时会让服务端主动结束会话（bp 45000081 等包超时）。
         # 队列同时充当切换窗口的缓存：无目标时 sender 停在队首等待，音频不丢。
-        self._buf = collections.deque()
+        self._buf = collections.deque(maxlen=BUF_MAX)
         self._buf_cv = threading.Condition()
-        self._sender = None
+        self._buf_gen = 0      # 清空代际：sender 取出但未发出的旧块据此丢弃
 
     def route_to(self, target):
         """切换音频发送目标（None = 缓存模式，等待新连接接管）"""
@@ -128,6 +132,7 @@ class Recorder(threading.Thread):
                         return
                     self._buf_cv.wait(0.2)
                 chunk = self._buf[0]
+                gen = self._buf_gen
             # 等目标就绪（切换窗口期间音频留在队列里）
             while True:
                 with self._route_lock:
@@ -137,9 +142,21 @@ class Recorder(threading.Thread):
                 time.sleep(0.02)
             if t is None:          # 已停止且无目标：丢弃剩余
                 return
-            ok = t.send_audio(chunk)
             with self._buf_cv:
-                self._buf.popleft()
+                # 队列可能已被 clear_buffer 清空（按键前音频）：此时这块直接作废。
+                # 不能无条件 popleft——空队列会抛 IndexError 打死发送线程，
+                # 之后所有音频无人发送，服务端 10s 收不到包即报 45000081。
+                stale = (gen != self._buf_gen or not self._buf
+                         or self._buf[0] is not chunk)
+                if not stale:
+                    self._buf.popleft()
+            if stale:
+                continue
+            try:
+                ok = t.send_audio(chunk)
+            except Exception as e:
+                log.warning("音频发送异常: %s", e)
+                ok = False
             if not ok:
                 log.warning("音频发送失败(连接已断),丢弃 1 包")
                 if self.on_send_fail and not self._fail_fired:
@@ -161,8 +178,12 @@ class Recorder(threading.Thread):
         self._sender = threading.Thread(target=self._send_loop, daemon=True, name="asr-sender")
         self._sender.start()
         try:
+            t0 = time.time()
             while not self._stop_evt.is_set():
                 chunk = self._proc.stdout.read(self.chunk_bytes)
+                if chunk and not self.ready_evt.is_set():
+                    self.ready_evt.set()   # 浮窗据此从"未就绪"切到可说话
+                    log.info("录音流就绪（首块音频 %.0f ms）", (time.time() - t0) * 1000)
                 if not chunk:
                     break
                 self._dispatch(chunk)
@@ -199,6 +220,30 @@ class Recorder(threading.Thread):
                     self._proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     self._proc.kill()
+
+    def configure(self, silence_timeout_sec=0, on_silence=None, silence_after_input_sec=0,
+                  on_rms=None, on_send_fail=None, rms_threshold=300):
+        """按会话装配本轮参数。预热流常驻，参数每轮重新装配；空闲时传全默认 = 复位。"""
+        self.silence_timeout_sec = silence_timeout_sec
+        self.on_silence = on_silence
+        self.silence_after_input_sec = silence_after_input_sec
+        self.on_rms = on_rms
+        self.on_send_fail = on_send_fail
+        self.rms_threshold = rms_threshold
+        self._silence_ms = 0
+        self._heard_speech = False
+
+    def clear_buffer(self):
+        """丢弃缓存音频：预热期间采到的（按键前）内容不上送，只上传按住之后的。"""
+        with self._buf_cv:
+            self._buf.clear()
+            self._buf_gen += 1   # 让已取出、尚未发送的那一块也作废
+
+    def idle(self):
+        """回到空闲预热态：停发、清缓存、复位会话参数；parec 继续跑，下次按下即用。"""
+        self.route_to(None)
+        self.clear_buffer()
+        self.configure()
 
     def stop_and_drain(self):
         if self._proc is None:
@@ -316,6 +361,7 @@ class VoiceIMEService:
         self._draft_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._xfocus = XFocus()
         self._mode_b = False        # 录音模式：A 持续输入（默认）/ B 即停（Shift 切换）
+        self._warm = None           # 常驻预热录音流（见 _take_recorder）
 
     def _osd_send(self, obj):
         """向桌面浮窗发状态（录音中 RMS / stop 隐藏），失败忽略"""
@@ -564,6 +610,48 @@ class VoiceIMEService:
             # preedit 清空由润色 worker 在 commit 后统一处理
             # （此前这里立即清空会让润色等待期候选栏空白 0.3-2s）
 
+    def _take_recorder(self, chunk_bytes):
+        """本轮录音流：优先复用常驻预热流；warm_mic=false 或采集参数变了才新建。"""
+        want = (self.cfg["sample_rate"], chunk_bytes, self.cfg.get("audio_device", "default"))
+        warm = bool(self.cfg.get("warm_mic", True))
+        w = self._warm
+        if warm and w is not None and w.is_alive() and (w.sample_rate, w.chunk_bytes, w.device) == want:
+            return w
+        if w is not None:
+            try:
+                w.stop_and_drain()     # 参数变更或关闭预热：收掉旧流
+            except Exception:
+                pass
+            self._warm = None
+        rec = Recorder(*want)
+        rec.start()
+        rec.route_to(None)
+        if warm:
+            self._warm = rec
+        return rec
+
+    def _beep_when_ready(self, rec):
+        """开始提示音兼就绪信号：首块音频到手才响，用户听到之后再开口就不会被吞字。"""
+        def fire():
+            self._osd_send({"type": "ready"})
+            _play_beep(BEEP_START)
+        if rec.ready_evt.is_set():
+            fire()
+            return
+        def wait():
+            if rec.ready_evt.wait(timeout=3):
+                fire()
+        threading.Thread(target=wait, daemon=True).start()
+
+    def preheat(self):
+        """服务启动即拉起常驻录音流：第一次按下也不用等 parec 冷启动。"""
+        if not self.cfg.get("warm_mic", True):
+            return
+        try:
+            self._take_recorder(self.cfg["sample_rate"] * 2 * self.cfg.get("chunk_ms", 200) // 1000)
+        except Exception as e:
+            log.warning("预热录音流失败: %s", e)
+
     def start_session(self, session, silent=False):
         # ── 锁快路径：只做本地装配（毫秒级），网络握手交给后台线程 ──
         with session.lock:
@@ -576,8 +664,6 @@ class VoiceIMEService:
             session.drafting = False
             # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
             session.recent = []
-            # 长按触发即显示浮窗：浮窗出现 = 可开始说话
-            self._osd_send({"type": "show"})
 
             chunk_bytes = self.cfg["sample_rate"] * 2 * self.cfg.get("chunk_ms", 200) // 1000
             silence_sec = int(self.cfg.get("silence_timeout_sec", 15) or 0)
@@ -603,21 +689,23 @@ class VoiceIMEService:
                 threading.Thread(target=self.switch_session,
                                  args=(session, session.generation), daemon=True).start()
 
-            # 先起录音流（parec 本地启动，毫秒级）：ASR 握手期的音频进缓存，
-            # 握手完成即刻补发——用户按下就能开口，不必等 WebSocket 建连
-            rec = Recorder(self.cfg["sample_rate"], chunk_bytes,
-                           self.cfg.get("audio_device", "default"),
-                           silence_timeout_sec=silence_sec,
-                           on_silence=on_silence if silence_sec > 0 else None,
-                           rms_threshold=rms_threshold,
-                           silence_after_input_sec=after_input_sec,
-                           on_rms=self._on_rms,
-                           on_send_fail=on_send_fail)
-            rec.start()
+            # 录音流：默认复用常驻预热流——parec 从启动到首块音频要 1.1 秒
+            # （xrdp 音频源冷启动，各种采样率/缓冲参数都一样），这段时间麦克风
+            # 根本没在采，用户看到浮窗就开口，开头一两个字必丢。
+            rec = self._take_recorder(chunk_bytes)
+            rec.configure(silence_timeout_sec=silence_sec,
+                          on_silence=on_silence if silence_sec > 0 else None,
+                          rms_threshold=rms_threshold,
+                          silence_after_input_sec=after_input_sec,
+                          on_rms=self._on_rms,
+                          on_send_fail=on_send_fail)
+            rec.clear_buffer()     # 预热期（按键前）采到的音频不上送
             rec.route_to(None)     # 暂存音频，等 ASR 接管后 flush_pending 补发
             session.rec = rec
+            # 浮窗：未就绪先画灰线，首块音频到达再转彩色声波
+            self._osd_send({"type": "show", "ready": rec.ready_evt.is_set()})
         if not silent:
-            _play_beep(BEEP_START)   # 提示音不等握手：按下即响
+            self._beep_when_ready(rec)   # 提示音就是"可以开口了"的信号，不等 WebSocket 握手
         with self.clients_lock:
             self._rec_count += 1
         self._tray_state()
@@ -843,7 +931,11 @@ class VoiceIMEService:
                 self._rec_count -= 1
         self._tray_state()
         if rec:
-            rec.stop_and_drain()
+            rec.flush_pending()    # 队列发完（原 stop_and_drain 的收尾语义）
+            if rec is self._warm:
+                rec.idle()         # 预热流常驻：回空闲态，不杀进程
+            else:
+                rec.stop_and_drain()
         self._osd_send({"type": "stop"})
         finals = asr.stop(timeout=5) if asr else []
         if asr is not None and getattr(asr, "_error", None):
@@ -909,7 +1001,10 @@ class VoiceIMEService:
             self._tray_state()
         if rec:
             try:
-                rec.stop_and_drain()
+                if rec is self._warm:
+                    rec.idle()
+                else:
+                    rec.stop_and_drain()
             except Exception:
                 pass
         self._osd_send({"type": "stop"})
@@ -1002,6 +1097,11 @@ class VoiceIMEService:
                     self.cancel_session(s)
                 except Exception:
                     pass
+            if self._warm is not None:
+                try:
+                    self._warm.stop_and_drain()
+                except Exception:
+                    pass
             os._exit(0)
 
         signal.signal(signal.SIGTERM, _shutdown)
@@ -1063,7 +1163,9 @@ def main():
     setup_logging()
     config_path = sys.argv[1] if len(sys.argv) > 1 else \
         str(Path(__file__).resolve().parent / "config.json")
-    VoiceIMEService(config_path).run()
+    svc = VoiceIMEService(config_path)
+    svc.preheat()
+    svc.run()
 
 
 if __name__ == "__main__":

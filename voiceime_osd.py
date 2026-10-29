@@ -87,6 +87,7 @@ class OSD:
         self.visible = False
         self.have_rms = False   # 收到过 rms 才启用超时隐藏（防 show→首 rms 空窗闪烁）
         self.mode_b = False     # 录音模式：False=持续输入(A) 声波青蓝 / True=即停(B) 声波橙色
+        self.ready = True          # 麦克风是否已真正在采（show 的 ready 字段控制）
         self.polish_state = None   # LLM 润色状态：None=空闲 / 'on'=润色中 / 'fail'=润色失败（短暂红后恢复）
         self.polish_until = 0.0    # fail 状态的自动恢复时刻（monotonic）
         self.peak = 1.0            # 自适应峰值：不同麦克风电平下都能看出起伏
@@ -112,9 +113,16 @@ class OSD:
             except Exception:
                 continue
             if msg.get("type") == "show":
-                # 长按触发即显示：浮窗出现 = 可开始说话（服务端已连接）
+                # ready=False：麦克风还没真正在采（parec 冷启动约 1.1s），先画灰线，
+                # 服务端首块音频到达后补一条 {"type":"ready"} 再转彩色声波
+                self.ready = bool(msg.get("ready", True))
                 self.last_data = time.monotonic()
                 self.show()
+            elif msg.get("type") == "ready":
+                self.ready = True
+                self.last_data = time.monotonic()
+                if self.visible:
+                    self.da.queue_draw()
             elif msg.get("type") == "stop":
                 self.hide()
             elif msg.get("type") == "mode":
@@ -169,7 +177,10 @@ class OSD:
     def on_draw(self, widget, cr):
         # 声波条只表示录音模式：青蓝=持续输入 A，橙=即停 B（松手即上屏）
         # 润色状态改用卡片描边提示，不改变声波主色：黄=润色中，红=失败（1.5 秒后恢复）
-        bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
+        if not self.ready:
+            bar_color = (0.55, 0.55, 0.58, 0.85)   # 未就绪：灰线，别让用户以为可以开口
+        else:
+            bar_color = (1.0, 0.62, 0.25, 1.0) if self.mode_b else FG
         if self.polish_state == "fail":
             edge_color = (1.0, 0.25, 0.25, 0.95)
         elif self.polish_state == "on":
@@ -204,7 +215,7 @@ class OSD:
         cr.set_line_width(1.2)
         cr.stroke()
         # 声波条：高度随 RMS，轻微相位差 → 波纹效果
-        rms = self.display_rms
+        rms = self.display_rms if self.ready else 0
         # 相对当前峰值归一化：有声时接近满幅，静音时回落成一条细线——两者一眼可辨，
         # 且不依赖麦克风绝对电平（实测环境 RMS 只有 20~50，固定 /300 几乎看不出起伏）
         norm = min(1.0, max(0.0, rms) / self.peak) ** 0.7

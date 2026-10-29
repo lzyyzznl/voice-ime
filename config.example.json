@@ -18,6 +18,7 @@
   "sample_rate": 16000,
   "chunk_ms": 200,
   "audio_device": "default",
+  "warm_mic": true,
   "silence_timeout_sec": 15,
   "silence_after_input_sec": 30,
   "silence_rms_threshold": 300,

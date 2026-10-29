@@ -136,9 +136,8 @@ def polish(cfg, text, context=None, timeout=None):
     if not api_key:
         raise RuntimeError("未找到 API Key（llm.api_key 或环境变量 %s）"
                            % ((cfg.get("api_key") or "").strip() or "DEEPSEEK_API_KEY"))
-    body_text = text
-    if context:
-        body_text = "上文：\n" + "\n".join(context) + "\n待润色：\n" + text
+    # 提示词按「上文/待润色」两段约定；没有上文时也带「待润色：」，让边界约定始终成立
+    body_text = (("上文：\n" + "\n".join(context) + "\n") if context else "") + "待润色：\n" + text
     prompt = cfg.get("prompt", "")
     messages = [{"role": "user",
                  "content": (prompt + "\n" + body_text) if prompt else body_text}]

@@ -27,6 +27,7 @@ import sys
 import time
 import unicodedata
 import urllib.request
+import llm_polish
 
 DEFAULT_EVAL = "eval_set.json"
 DEFAULT_CFG = "config.json"
@@ -35,9 +36,10 @@ HALLU_WORDS = ["嗯", "啊", "那个", "就是", "然后", "哎呀", "嗯嗯", "
 
 
 def load_cfg(path):
-    with open(path, encoding="utf-8") as f:
-        cfg = json.load(f).get("llm") or {}
-    return cfg
+    """读 config.json 的 llm 段并展开当前 active 模型（与生产同款，见 llm_polish.load_cfg）。"""
+    from pathlib import Path
+    llm_polish.CONFIG_PATH = Path(path).resolve()
+    return llm_polish.load_cfg()
 
 
 def load_eval(path):
@@ -94,40 +96,9 @@ def llm_judge(cfg, expected, output):
     return answer.startswith("yes"), answer
 
 
-def call_llm(cfg, text):
-    """与草稿窗口同款请求：system_prompt + prompt(原文:) + 非思考 + <output> 标签提取"""
-    endpoint = cfg.get("endpoint", "").strip()
-    if not endpoint:
-        raise RuntimeError("config.json 未配置 llm.endpoint")
-    key_var = cfg.get("api_key", "").strip() or "DEEPSEEK_API_KEY"
-    api_key = os.environ.get(key_var, "").strip()
-    if not api_key:
-        raise RuntimeError("未找到 API Key：环境变量 %s 未设置" % key_var)
-    model = cfg.get("model", "").strip()
-    system_prompt = cfg.get("system_prompt", "").strip()
-    prompt = cfg.get("prompt", "").strip()
-
-    messages = [{"role": "user",
-                 "content": (prompt + "\n" + text) if prompt else text}]
-    if system_prompt:
-        messages.insert(0, {"role": "system", "content": system_prompt})
-    body = {
-        "model": model,
-        "messages": messages,
-        "thinking": {"type": "disabled"},
-        "temperature": 0,   # 固定最低随机性：评估可复现，结果稳定
-    }
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    if api_key:
-        req.add_header("Authorization", "Bearer " + api_key)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    raw = data["choices"][0]["message"]["content"].strip()
-    m = re.search(r"<output>(.*?)</output>", raw, re.S)
-    return (m.group(1).strip() if m else raw), raw
+def call_llm(cfg, text, context=None):
+    """直接走生产润色链路（llm_polish.polish）：JSON 输出 / 超时 / 容错都与上屏时一致。"""
+    return llm_polish.polish(cfg, text, context), ""
 
 
 def main():
@@ -166,7 +137,7 @@ def main():
         expected = item.get("expected", "")
         t0 = time.monotonic()
         try:
-            output, raw = call_llm(cfg, text)
+            output, raw = call_llm(cfg, text, item.get("context"))
             err = None
         except Exception as e:
             output, raw = "", ""

@@ -16,17 +16,10 @@
 下次打开是全新的。
 
 config.json 的 llm 段（api_key 填 sk- 开头的密钥，或填环境变量名从环境读取）：
-  system_prompt = 角色 + 全部润色规则 + 标签输出约束（每次请求不变）
-  prompt       = user 消息的前缀，默认 "原文："（后面接待润色文本）
+  system_prompt = 角色 + 全部润色规则（与自动润色共用同一份，内容见 config.example.json）
+  prompt       = user 消息前缀，一般留空（提示词本身已按「上文/待润色」分段）
   auto_polish  = true 时核心服务在每句上屏前自动润色（本窗口不受影响）
-  "llm": {
-    "endpoint": "https://api.deepseek.com/v1/chat/completions",
-    "api_key": "sk-...",
-    "auto_polish": false,
-    "model": "deepseek-v4-flash",
-    "system_prompt": "你是文本润色助手。删除文本中的口头语、感叹词和重复（如 嗯、啊、那个、就是），修正不通顺的用词和语病，保持原意，使表达通顺自然。将润色后的文本放在 <output> 与 </output> 标签内输出，标签外不要输出任何内容。",
-    "prompt": "原文："
-  }
+  多模型写法见 README 的 llm.models[]，本窗口与核心服务取同一个 active 模型
 """
 import json
 import os

@@ -113,5 +113,39 @@
     "scenario": "自我纠正-哦对",
     "input": "嗯我们把报告，哦对，把文档发出去",
     "expected": "把文档发出去"
+  },
+  {
+    "scenario": "文件名-点PY下划线",
+    "input": "文件名是 asr 下划线 doubao 点 P Y",
+    "expected": "文件名是 asr_doubao.py"
+  },
+  {
+    "scenario": "文件名-点js即json",
+    "context": [
+      "RDC 上那个工作项我看过了，ASR 这块的 API 文档还差一版",
+      "文件名是 asr_doubao.py"
+    ],
+    "input": "哦还有 config 点 js 里的 key 也要同步一下",
+    "expected": "config.json 里的 key 也要同步一下"
+  },
+  {
+    "scenario": "英文-缩写大写",
+    "input": "这个 api 用 json 返回，走 http 协议",
+    "expected": "这个 API 用 JSON 返回，走 HTTP 协议"
+  },
+  {
+    "scenario": "标点-疑问句",
+    "input": "这个功能什么时候能上线",
+    "expected": "这个功能什么时候能上线？"
+  },
+  {
+    "scenario": "标点-并列顿号",
+    "input": "需要改三处 接口 文档 测试",
+    "expected": "需要改三处：接口、文档、测试"
+  },
+  {
+    "scenario": "标点-口述冒号",
+    "input": "注意冒号这个接口要加超时",
+    "expected": "注意：这个接口要加超时"
   }
 ]

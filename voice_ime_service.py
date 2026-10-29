@@ -28,7 +28,6 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from asr_client import StreamingASR
 from asr_doubao import DoubaoASR, URL_ASYNC
 import llm_polish
 
@@ -423,33 +422,20 @@ class VoiceIMEService:
             self.switching = False      # 正在换代续录：stop 需等它结束再收尾，否则缓存音频无人消费
 
     def _make_asr(self, session):
-        """按 config.asr_backend 构造 ASR 客户端（icenter/doubao），回调接口一致"""
+        """构造 ASR 客户端（豆包 bigmodel_async），回调接口：interim / final"""
         def _cbs():
             return (lambda p: self.on_interim(session, p),
                     lambda p: self.on_final(session, p))
-        if self.cfg.get("asr_backend", "doubao") == "doubao":
-            d = self.cfg.get("doubao") or {}
-            # 优化双向流式端点（bigmodel_async）：实测逐句 definite 正常，
-            # 帧数最少且有实时 preedit 预览。单次会话不再需要按 15s 切段
-            # （该限制来自 espeak 噪声音频的误测，长音频实测无截断）。
-            return DoubaoASR(
-                api_key=d.get("api_key", ""),
-                resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
-                request=d.get("request"),
-                sample_rate=self.cfg.get("sample_rate", 16000),
-                url=URL_ASYNC,
-            ).start(*_cbs())
-        # iCenter（公司自有模型）：优先 config.icenter 段，缺省回退顶层老键（兼容旧配置）
-        ic = self.cfg.get("icenter") or {}
-        return StreamingASR(
-            app_id=ic.get("app_id") or self.cfg.get("app_id", ""),
-            source=ic.get("source") or self.cfg.get("source", ""),
-            user_id=ic.get("user_id") or self.cfg.get("user_id", ""),
-            secret=ic.get("secret") or self.cfg.get("secret", ""),
-            env=ic.get("env") or self.cfg.get("env", "prod"),
-            url=ic.get("url") or None,
-            uac_app_id=ic.get("uac_app_id") or None,
+        d = self.cfg.get("doubao") or {}
+        # 优化双向流式端点（bigmodel_async）：实测逐句 definite 正常，
+        # 帧数最少且有实时 preedit 预览。单次会话不再需要按 15s 切段
+        # （该限制来自 espeak 噪声音频的误测，长音频实测无截断）。
+        return DoubaoASR(
+            api_key=d.get("api_key", ""),
+            resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
+            request=d.get("request"),
             sample_rate=self.cfg.get("sample_rate", 16000),
+            url=URL_ASYNC,
         ).start(*_cbs())
 
     def on_interim(self, session, p):
@@ -549,7 +535,7 @@ class VoiceIMEService:
                     session.polish_idle.set()
 
     def on_final(self, session, p):
-        """iCenter 停顿分句：drafting 时追加进草稿；否则每句 final 立即提交，
+        """停顿分句：drafting 时追加进草稿；否则每句 final 立即提交，
         避免 preedit 被新句覆盖、内容丢失"""
         text = p.get("text", "").strip()
         if not text:
@@ -630,7 +616,7 @@ class VoiceIMEService:
         # ASR 握手放后台：慢连接不再冻结控制通道（模式/草稿/cancel 照常响应）
         threading.Thread(target=self._attach_asr, args=(session, gen), daemon=True).start()
         # 录音指示由桌面浮窗（voiceime_osd.py 声波动画）呈现，不再用候选栏文字
-        # 单次会话兜底上限（豆包 300s / iCenter 60s）：静默切换 ASR 会话续录，
+        # 单次会话兜底上限：静默切换 ASR 会话续录，
         # 录音流不中断（parec 持续），切换窗口音频缓存补发 → 内容零丢失
         def auto_stop():
             time.sleep(self._rotate_sec())
@@ -714,8 +700,8 @@ class VoiceIMEService:
         豆包 async 端点长音频实测无截断：30s 单会话完整识别、逐句 definite
         定稿。旧的"只认前 15 秒"结论来自 espeak 噪声音频的误测，已推翻。
         保留 300s 只为防连接老化，不再按 12s 切段（切段会让长句被拆成
-        多段上屏 + 分段润色）。iCenter 服务端硬限制 60s。"""
-        return 300 if self.cfg.get("asr_backend", "doubao") == "doubao" else 60
+        多段上屏 + 分段润色）。"""
+        return 300
 
     def switch_session(self, session, gen):
         """会话上限到期：旧会话停止提交 → 新会话接管同一录音流（无缝续录）"""

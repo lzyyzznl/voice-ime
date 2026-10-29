@@ -3,7 +3,7 @@
 """
 豆包流式语音识别（火山引擎 SAUC 双向流式）客户端
 ================================================
-与 asr_client.StreamingASR 同接口（start/send_audio/stop/close），供 voice_ime_service 切换后端。
+接口：start(on_interim, on_final) / send_audio / stop / close。
 
 - 鉴权：X-Api-Key / X-Api-Resource-Id / X-Api-Request-Id（WS 握手头，无签名）
 - 端点：wss://openspeech.bytedance.com/api/v3/sauc/bigmodel（边说边出字）
@@ -50,7 +50,7 @@ def _json_frame(message_type, flags, seq, obj) -> bytes:
 
 
 class DoubaoASR:
-    """单次录音会话的豆包流式转写客户端（同步模型，与 StreamingASR 一致）。"""
+    """单次录音会话的豆包流式转写客户端（同步模型）。"""
 
     def __init__(self, api_key, resource_id="volc.seedasr.sauc.duration",
                 url=URL_ASYNC, sample_rate=16000, sample_width=2, request=None):
@@ -73,6 +73,7 @@ class DoubaoASR:
         self._done_ranges = set()        # 已提交的 definite 句 (start,end,text)
         self._last_interim = ""          # 上次 interim 文本（去重）
         self._last_text = ""             # 最近一帧 result.text（流被直接关闭时的兜底）
+        self.server_error = None          # (code, message)：服务端业务错误，重连无意义
 
     # ── 生命周期 ──
     def start(self, on_interim=None, on_final=None):
@@ -84,7 +85,7 @@ class DoubaoASR:
         }
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE   # 内网 HTTPS 拦截（与 asr_client 同）
+        ctx.verify_mode = ssl.CERT_NONE   # 内网 HTTPS 拦截（自签证书）
         self.ws = connect(self.url, additional_headers=headers,
                           ssl=ctx, open_timeout=10)
         payload = {
@@ -151,6 +152,7 @@ class DoubaoASR:
                     continue
                 code = obj.get("code", 0) if isinstance(obj, dict) else 0
                 if code:
+                    self.server_error = (code, obj.get("message", str(obj)))
                     self._error = f"识别错误: {obj.get('message', obj)}"
                     log.error("%s", self._error)
                     self._completed.set()

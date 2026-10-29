@@ -30,14 +30,12 @@ HISTORY = BASE / "logs" / "voiceime-history.jsonl"
 
 # 顶层允许键 + 类型约束（None = 任意 json 值）
 ALLOWED = {
-    "asr_backend": str, "app_id": str, "source": str, "user_id": str,
-    "secret": str, "env": str,
     "sample_rate": int, "chunk_ms": int, "audio_device": str,
     "silence_timeout_sec": (int, type(None)), "silence_after_input_sec": (int, type(None)),
     "silence_rms_threshold": int, "focus_lost_stop": bool, "hold_ms": int,
     "ptt_keys": str, "hold_keys": str,
 }
-SUBOBJECTS = {"osd", "llm", "doubao", "icenter"}   # dict 子对象整体校验类型
+SUBOBJECTS = {"osd", "llm", "doubao"}   # dict 子对象整体校验类型
 
 MODS = ("ctrl", "alt", "shift")
 COMBO_KEYS = {"space", "tab", "esc", "escape", "`"}
@@ -62,9 +60,6 @@ def valid_combo(s):
             return False
     # 必须带修饰键：裸字母/空格在任意输入框打字都会误触发录音
     return bool(mods)
-
-
-BACKENDS = ("doubao", "icenter")
 
 
 def load_cfg():
@@ -113,9 +108,6 @@ def sanitize(patch):
                     d["request"] = {kk: vv for kk, vv in v["request"].items()
                                     if isinstance(vv, (bool, int, str))}
                 clean[k] = d
-            elif k == "icenter":
-                keys = ("env", "url", "app_id", "source", "user_id", "secret", "uac_app_id")
-                clean[k] = {kk: vv for kk, vv in v.items() if kk in keys and isinstance(vv, str)}
             elif k == "llm":
                 model_keys = ("id", "name", "endpoint", "api_key", "model", "system_prompt", "prompt")
                 d = {"active": v.get("active")} if isinstance(v.get("active"), str) else {}
@@ -138,8 +130,6 @@ def sanitize(patch):
                             if kk in ("width", "height", "y_ratio") and isinstance(vv, (int, float))}
         else:
             errors.append(f"未知键: {k}")
-    if "asr_backend" in clean and clean["asr_backend"] not in BACKENDS:
-        errors.append("asr_backend 必须为 doubao 或 icenter")
     for k in ("ptt_keys", "hold_keys"):
         if k in clean and not valid_combo(clean[k]):
             errors.append(f"{k}: 必须包含 ctrl/alt/shift 修饰键，可加一个普通键，如 ctrl+alt 或 ctrl+alt+space")
@@ -150,7 +140,7 @@ def sanitize(patch):
 
 def service_status():
     """ASR 核心存活（systemd）+ 引擎连接（socket ESTAB）+ 后端"""
-    out = {"alive": False, "pid": None, "backend": None, "engine": False}
+    out = {"alive": False, "pid": None, "engine": False}
     try:
         r = subprocess.run(["systemctl", "--user", "is-active", "voiceime-core"],
                            capture_output=True, text=True, timeout=5)
@@ -169,10 +159,6 @@ def service_status():
         r = subprocess.run(["ss", "-xp"], capture_output=True, text=True, timeout=5)
         out["engine"] = any("voiceime-service.sock" in ln and "ESTAB" in ln
                             for ln in r.stdout.splitlines())
-    except Exception:
-        pass
-    try:
-        out["backend"] = load_cfg().get("asr_backend")
     except Exception:
         pass
     return out
@@ -256,20 +242,6 @@ body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.6 var(--sans)
 .card-h h2{font:800 13px/1.2 var(--mono);letter-spacing:.05em}
 .card-h .hint{margin-left:auto;font:10.5px/1 var(--mono);color:var(--muted);padding:3px 6px;border:1px solid var(--muted)}
 .card-desc{margin:0 0 14px;font-size:12px;color:var(--muted);line-height:1.55}
-.is-off{filter:grayscale(1);opacity:.55}
-.backends{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.rb{position:relative}
-.rb input{position:absolute;inset:0;opacity:0;cursor:pointer;z-index:1}
-.rb .opt{display:block;height:100%;border:2px solid var(--ink);background:var(--paper2);
-  padding:12px 14px;box-shadow:3px 3px 0 var(--ink)}
-.rb .opt .t{display:block;font:800 14px/1.2 var(--mono)}
-.rb .opt .d{display:block;margin-top:4px;font:11px/1.5 var(--mono);color:var(--muted)}
-.rb input:hover+.opt{background:var(--paper)}
-.rb input:focus-visible+.opt{outline:3px solid var(--red);outline-offset:3px}
-.rb input:checked+.opt{background:var(--ink);color:var(--paper);box-shadow:5px 5px 0 var(--red)}
-.rb input:checked+.opt .t{color:var(--paper)}
-.rb input:checked+.opt .d{color:rgba(242,239,232,.7)}
-.rb input:checked+.opt::after{content:"";position:absolute;top:5px;right:5px;width:10px;height:10px;background:var(--red)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:15px 20px}
 .f{display:flex;flex-direction:column;gap:5px;min-width:0}
 .f.wide{grid-column:1/-1}
@@ -290,7 +262,7 @@ select option{background:var(--paper)}
   color:var(--ink);cursor:pointer;padding:3px 8px;font:11px/1 var(--mono)}
 .eye:hover{background:var(--ink);color:var(--paper)}
 .subgrid{display:grid;grid-template-columns:1fr 1fr;gap:15px 20px}
-@media(max-width:760px){.subgrid,.llm-grid{grid-template-columns:1fr}.backends{grid-template-columns:1fr}}
+@media(max-width:760px){.subgrid,.llm-grid{grid-template-columns:1fr}}
 .sw{display:flex;align-items:center;gap:11px;background:var(--paper2);border:2px solid var(--ink);
   padding:8px 12px;cursor:pointer;position:relative;box-shadow:2px 2px 0 var(--ink)}
 .sw input{position:absolute;opacity:0;pointer-events:none}
@@ -369,10 +341,9 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#f2efe8" stroke-width="1.8" stroke-linecap="square"><rect x="7" y="3" width="10" height="15" rx="0"/><path d="M4 11v1a8 8 0 0 0 16 0v-1M12 20v1.6"/></svg></div>
     <div class="h-t">
       <h1>voice-ime 配置台</h1>
-      <div class="sub">fcitx4 语音输入 · 豆包 / iCenter 流式识别 · 配置保存即写 config.json</div>
+      <div class="sub">fcitx4 语音输入 · 豆包流式识别 · 配置保存即写 config.json</div>
     </div>
     <div class="badges" id="badges">
-      <span class="badge">后端 <b id="bdgBackend">…</b></span>
       <span class="badge"><span class="dot" id="bdgSvc"></span>服务 <b id="bdgPid">…</b></span>
       <span class="badge"><span class="dot" id="bdgEng"></span>引擎</span>
     </div>
@@ -384,38 +355,6 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
   </nav>
 
   <div class="pane" id="pane-cfg">
-
-  <section class="card">
-    <div class="card-h"><h2>识别后端</h2><span class="hint">RESTART 生效</span></div>
-    <p class="card-desc">引擎重启后按此配置连接 ASR 服务；切换无需卸载引擎。</p>
-    <div class="backends">
-      <label class="rb"><input type="radio" name="asr_backend" value="doubao" id="rbDoubao">
-        <span class="opt"><span class="t">豆包 SeedASR 2.0</span><span class="d">云端流式 · 首字快 · 停顿定稿（推荐）</span></span></label>
-      <label class="rb" id="icenterOpt"><input type="radio" name="asr_backend" value="icenter" id="rbIcenter">
-        <span class="opt"><span class="t">iCenter 内网流式</span><span class="d">内网闭环 · 首字约 4s · 凭据已保留</span></span></label>
-    </div>
-    <p class="card-desc" id="hiddenWarn" style="display:none;margin:10px 0 0;color:var(--red)"></p>
-  </section>
-
-  <section class="card" id="icenterCard">
-    <div class="card-h"><h2>iCenter 公司自有模型</h2><span class="hint" id="icenterState">可选后端参数</span></div>
-    <p class="card-desc">仅当后端选「iCenter 内网流式」时生效，默认后端仍是豆包。参数写入 config.json 的 <code>icenter</code> 段；某项留空则回退顶层旧键。UAC token 由本机 iCenter 客户端（UDS）提供，无需填写。</p>
-    <div class="grid">
-      <div class="f"><label for="ic_env">环境 env</label>
-        <select id="ic_env">
-          <option value="prod">prod · 生产</option>
-          <option value="gray">gray · 灰度</option>
-          <option value="test">test · 测试</option>
-        </select></div>
-      <div class="f"><label for="ic_app_id">App ID</label><input type="text" id="ic_app_id" spellcheck="false"></div>
-      <div class="f"><label for="ic_source">Source</label><input type="text" id="ic_source" spellcheck="false"></div>
-    </div>
-    <div class="grid" style="margin-top:14px">
-      <div class="f"><label for="ic_user_id">User ID</label><input type="text" id="ic_user_id" spellcheck="false"></div>
-      <div class="f"><label for="ic_secret">Secret</label><input type="password" id="ic_secret" spellcheck="false" autocomplete="off"></div>
-      <div class="f"><label for="ic_uac_app_id">UAC appId（UDS 取 token）</label><input type="text" id="ic_uac_app_id" spellcheck="false" placeholder="564069206224"></div>
-    </div>
-  </section>
 
   <section class="card" id="doubaoCard">
     <div class="card-h"><h2>豆包 SeedASR</h2><span class="hint" id="doubaoState">识别请求参数</span></div>
@@ -549,13 +488,6 @@ const getPath = (o, p) => { let t = o; for (const k of p.split(".")) { if (t == 
 
 /* 字段 → config 路径 + 类型（s=字符串 n=数字 b=布尔） */
 const FIELD = [
-  ["asr_backend",  "asr_backend", "s"],
-  ["ic_env",       "icenter.env", "s"],
-  ["ic_app_id",    "icenter.app_id", "s"],
-  ["ic_source",    "icenter.source", "s"],
-  ["ic_user_id",   "icenter.user_id", "s"],
-  ["ic_secret",    "icenter.secret", "s"],
-  ["ic_uac_app_id", "icenter.uac_app_id", "s"],
   ["api_key",      "doubao.api_key", "s"],
   ["enable_punc",  "doubao.request.enable_punc", "b"],
   ["enable_itn",   "doubao.request.enable_itn", "b"],
@@ -656,27 +588,11 @@ function collectLlm(){
 }
 
 function fillForm(cfg){
-  // 兼容旧配置：iCenter 参数曾在顶层（app_id/source/user_id/secret/env），
-  // 缺 icenter 段时用顶层值预填，让界面显示的是实际生效值。
-  const ic = cfg.icenter || {};
-  cfg.icenter = {
-    env:      ic.env || cfg.env || "prod",
-    app_id:   ic.app_id || cfg.app_id || "",
-    source:   ic.source || cfg.source || "",
-    user_id:  ic.user_id || cfg.user_id || "",
-    secret:   ic.secret || cfg.secret || "",
-    uac_app_id: ic.uac_app_id || "",
-  };
   fillModels(cfg);
   for (const [id, path, type, ro] of FIELD){
     let v = getPath(cfg, path);
     if (v === undefined && path in FALLBACK) v = FALLBACK[path];
     if (v === undefined) continue;
-    if (id === "asr_backend") {
-      document.querySelectorAll('input[name="asr_backend"]')
-        .forEach(r => r.checked = (r.value === String(v)));
-      continue;
-    }
     const el = $(id); if (!el) continue;
     if (ro) { el.textContent = type === "b" ? (v ? "开" : "关") : String(v); continue; }
     if (type === "b") el.checked = !!v;
@@ -688,11 +604,6 @@ function collectCfg(){
   const cfg = {};
   for (const [id, path, type, ro] of FIELD){
     if (ro) continue;
-    if (id === "asr_backend") {
-      const r = document.querySelector('input[name="asr_backend"]:checked');
-      if (r) setPath(cfg, path, r.value);
-      continue;
-    }
     const el = $(id); if (!el) continue;
     let v;
     if (type === "b") v = el.checked;
@@ -711,45 +622,16 @@ function refreshState(){
   fetch("/api/state").then(r => r.json()).then(s => {
     state = s;
     const svc = s.service || {};
-    $("bdgBackend").textContent = svc.backend || "?";
     $("bdgPid").textContent = svc.alive ? "PID " + svc.pid : "已停止";
     setDot("bdgSvc", svc.alive ? "ok" : "bad");
     setDot("bdgEng", svc.engine ? "ok" : "");
-    if (s.config && !window._filled){ fillForm(s.config); applyHidden(s.config); syncDisabled(); window._filled = true; }
+    if (s.config && !window._filled){ fillForm(s.config); syncDisabled(); window._filled = true; }
   }).catch(() => { setDot("bdgSvc", "bad"); setDot("bdgEng", ""); });
 }
-function applyHidden(cfg){
-  /* 隐藏配置：config.hidden.icenter 为真才暴露 iCenter 后端与参数（只支持手改 JSON 打开） */
-  const show = !!(cfg && cfg.hidden && cfg.hidden.icenter);
-  $("icenterOpt").style.display = show ? "" : "none";
-  $("icenterCard").style.display = show ? "" : "none";
-  document.querySelector(".backends").style.gridTemplateColumns = show ? "" : "1fr";
-  const backend = cfg && cfg.asr_backend;
-  const mismatch = !show && backend && backend !== "doubao";
-  const warn = $("hiddenWarn");
-  warn.style.display = mismatch ? "" : "none";
-  warn.textContent = mismatch
-    ? "config.json 的 asr_backend = " + backend + "，但隐藏配置未开启：请改回 doubao，或设 hidden.icenter=true 后刷新页面。"
-    : "";
-}
 function syncDisabled(){
-  // 隐藏 iCenter 时没有选中项 → 按豆包处理，避免豆包参数被误冻结
-  const rb = document.querySelector('input[name="asr_backend"]:checked');
-  const doubao = !rb || rb.value === "doubao";
-  const card = $("doubaoCard");
-  const icCard = $("icenterCard");
-  const icenter = rb && rb.value === "icenter";
-  icCard.classList.toggle("is-off", !icenter);
-  $("icenterState").textContent = icenter ? "公司自有模型 · 参数生效" : "可选后端 · 参数已冻结";
-  icCard.querySelectorAll("input,select").forEach(el => el.disabled = !icenter);
-  card.classList.toggle("is-off", !doubao);
-  $("doubaoState").textContent = doubao ? "识别请求参数" : "当前后端非豆包 · 参数已冻结";
-  card.querySelectorAll("input,select").forEach(el => el.disabled = !doubao);
-  $("accelerate_score").disabled = !($("enable_accelerate_text").checked && doubao);
-  $("rbDoubao").disabled = false; $("rbIcenter").disabled = false;
+  // 加速评分只在勾选「首字加速」时可填
+  $("accelerate_score").disabled = !$("enable_accelerate_text").checked;
 }
-document.querySelectorAll('input[name="asr_backend"]').forEach(r =>
-  r.addEventListener("change", syncDisabled));
 $("enable_accelerate_text").addEventListener("change", syncDisabled);
 
 /* ── toast ────────────────────────────── */

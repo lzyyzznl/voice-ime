@@ -54,7 +54,6 @@ vi config.json     # 或浏览器开 http://127.0.0.1:19530 配置台
 
 ```json
 {
-  "asr_backend": "doubao",
   "doubao": {
     "api_key": "<豆包火山引擎 Key>",
     "resource_id": "volc.seedasr.sauc.duration"

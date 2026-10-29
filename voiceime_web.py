@@ -270,9 +270,10 @@ select option{background:var(--paper)}
 .chips:focus-within{border-color:var(--red);box-shadow:3px 3px 0 var(--red)}
 .chips input,.chips input:hover,.chips input:focus-visible{width:auto;flex:1;min-width:150px;border:none;
   box-shadow:none;background:none;padding:4px 2px;font:12.5px/1.6 var(--mono)}
-.chip{display:inline-flex;align-items:center;gap:5px;background:var(--ink);color:var(--paper);
-  font:700 12px/1 var(--mono);padding:6px 7px 6px 9px}
-.chip-x{background:none;border:none;color:var(--paper);cursor:pointer;font:700 14px/1 var(--mono);
+.chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;min-width:0;background:var(--ink);
+  color:var(--paper);font:700 12px/1.35 var(--mono);padding:6px 7px 6px 9px}
+.chip .t{min-width:0;overflow-wrap:anywhere;word-break:break-all}
+.chip-x{flex:none;background:none;border:none;color:var(--paper);cursor:pointer;font:700 14px/1 var(--mono);
   padding:0 1px;opacity:.65}
 .chip-x:hover{opacity:1;color:var(--amber)}
 .prompt-btn{display:flex;flex-direction:column;gap:6px;width:100%;text-align:left;cursor:pointer;
@@ -700,7 +701,8 @@ function renderHotwords(){
   box.querySelectorAll(".chip").forEach(c => c.remove());
   hotwordList.forEach(w => {
     const c = document.createElement("span"); c.className = "chip";
-    c.appendChild(document.createTextNode(w));
+    const t = document.createElement("span"); t.className = "t"; t.textContent = w;
+    c.appendChild(t);
     const x = document.createElement("button"); x.type = "button"; x.className = "chip-x";
     x.textContent = "×"; x.title = "删除"; x.setAttribute("aria-label", "删除 " + w);
     x.addEventListener("click", () => { hotwordList = hotwordList.filter(v => v !== w); renderHotwords(); });

@@ -17,6 +17,7 @@ import http.client
 import json
 import os
 import re
+import socket
 import ssl
 import threading
 import urllib.parse
@@ -115,6 +116,14 @@ def _post(endpoint, body_bytes, timeout, auth=None):
                 raise RuntimeError("HTTP %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")))
             cache[endpoint] = conn
             return data
+        except (socket.timeout, TimeoutError):
+            # 超时不重发：请求多半已被网关接收并开始生成，重发等于同一句花两次钱、
+            # 上屏等待翻倍（8s → 16s）。连接状态未知，关掉别复用。
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
         except (http.client.HTTPException, OSError, ssl.SSLError, RuntimeError) as e:
             try:
                 conn.close()
@@ -186,9 +195,12 @@ def polish(cfg, text, context=None, timeout=None, glossary="auto"):
     try:
         obj = json.loads(raw)
     except Exception:
-        # 容错：旧提示词下模型仍输出 <output> 包裹/纯文本 → 兼容提取
+        # 容错：旧提示词下模型仍输出 <output> 包裹 → 兼容提取；都不是就报错，
+        # 由调用方降级原文。把截断的残 JSON 当润色结果上屏比不润色更糟。
         m = re.search(r"<output>(.*?)</output>", raw, re.S)
-        obj = {"polished": (m.group(1).strip() if m else raw)}
+        if not m:
+            raise RuntimeError("模型返回无法解析：%.120s" % raw)
+        obj = {"polished": m.group(1).strip()}
     # 字段兼容：官方 DeepSeek 返回 polished；内网网关返回 output
     out = ""
     if isinstance(obj, dict):

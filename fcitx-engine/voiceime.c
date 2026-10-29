@@ -35,6 +35,7 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
@@ -137,7 +138,6 @@ struct _VoiceIM {
     boolean ctrl_down;
     boolean alt_down;
     boolean shift_down;             /* Shift 按下状态 */
-    boolean shift_solo;             /* Shift 单独按下（期间无其他键）→ 释放时切模式 */
     boolean ctrl_solo;              /* Ctrl 单独按下（期间无其他键）→ 录音中释放时切草稿 */
     boolean mode_b;                 /* 录音模式：false=持续输入(A) true=对讲机(B，按住说松开停) */
     boolean armed;                  /* Ctrl+Alt 已按下，等待 hold_ms 判定 */
@@ -355,10 +355,32 @@ static void reset_stream_state(VoiceIM* im)
     im->alt_down = false;
     im->shift_down = false;
     im->ctrl_solo = false;
-    im->shift_solo = false;
     im->tri_pressed = false;
     im->esc_pressed = false;
     im->active_key = 0;
+}
+
+/* 写满 len 字节：socket 带 SO_SNDTIMEO，write 可能只写一部分。不补齐会让
+   服务端收到半条 JSON 并一直等换行，后面所有命令跟着错位。 */
+static int write_all(int fd, const char* buf, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    return 0;
+}
+
+static int send_line(VoiceIM* im, const char* json)
+{
+    return write_all(im->sock, json, strlen(json)) < 0
+        || write_all(im->sock, "\n", 1) < 0 ? -1 : 0;
 }
 
 static void send_cmd(VoiceIM* im, const char* json)
@@ -366,25 +388,15 @@ static void send_cmd(VoiceIM* im, const char* json)
     pthread_mutex_lock(&im->send_lock);
     if (im->sock < 0)
         connect_service(im);   /* 未连接/已断开：先重连（unix socket 快速失败） */
-    if (im->sock >= 0) {
-        ssize_t n = write(im->sock, json, strlen(json));
-        if (n < 0 && errno == EINTR)
-            n = write(im->sock, json, strlen(json));
-        if (n >= 0) {
-            n = write(im->sock, "\n", 1);
-            if (n < 0 && errno == EINTR)
-                write(im->sock, "\n", 1);
-        }
-        if (n < 0) { /* 断开或发送超时：安全停旧线程后重连 */
-            stop_recv_then_close(im, im->sock);
-            im->sock = -1;
-            if (connect_service(im)) {   /* 复用 fd 号时旧线程已结束，无竞态 */
-                reset_stream_state(im);  /* 断连丢了 done/started，复位防卡死 */
-                write(im->sock, json, strlen(json));
-                write(im->sock, "\n", 1);
-                im->recv_running = TRUE;
-                im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
-            }
+    if (im->sock >= 0 && send_line(im, json) < 0) {
+        /* 断开或发送超时：安全停旧线程后重连 */
+        stop_recv_then_close(im, im->sock);
+        im->sock = -1;
+        if (connect_service(im)) {   /* 复用 fd 号时旧线程已结束，无竞态 */
+            reset_stream_state(im);  /* 断连丢了 done/started，复位防卡死 */
+            send_line(im, json);
+            im->recv_running = TRUE;
+            im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
         }
     }
     pthread_mutex_unlock(&im->send_lock);
@@ -524,7 +536,6 @@ static void poll_queue_cb(void* data)
                 im->armed = false;
                 im->triggered = true;   /* 防 repeat：需全部释放后才重置 */
                 im->ctrl_solo = false;  /* 触发即清 solo：长按松手（Ctrl 后按时）不误切草稿 */
-                im->shift_solo = false; /* 同上：不误切录音模式 */
                 if (!im->recording) {
                     im->recording = true;
                     im->mode_b = !im->armed_hold;   /* hold 组合 → 持续 A，否则对讲机 B */
@@ -586,16 +597,12 @@ static void poll_queue_cb(void* data)
                 im->ctrl_down = false;
                 im->alt_down = false;
                 im->shift_down = false;
-                im->shift_solo = false;
                 im->ctrl_solo = false;
                 im->tri_pressed = false;
                 im->armed = false;
                 im->triggered = false;
                 clear_preedit(im);
                 refresh_ui(im);
-            } else if (m->type == 4) {   /* started：服务端已开始录音（手动/自动续录） */
-                dbg_log("poll_queue started: recording=true");
-                im->recording = true;
             }
         }
         g_free(m->text);
@@ -620,9 +627,21 @@ static void dbg_log(const char* fmt, ...)
 #ifndef ENGINE_LOG_PATH
 #define ENGINE_LOG_PATH "voiceime-engine.log"   /* Makefile -D 注入应用目录 */
 #endif
-    FILE* f = fopen(ENGINE_LOG_PATH, "a");
-    if (!f)
-        return;
+    /* 持开句柄：按键和每条消息都写日志，逐次 fopen+fclose 等于每键两次文件 IO。
+       flockfile 保证 recv 线程与主线程不会写出交叉的半行。 */
+    static FILE* f = NULL;
+    if (!f) {
+        f = fopen(ENGINE_LOG_PATH, "a");
+        if (!f)
+            return;
+        setvbuf(f, NULL, _IOLBF, 0);
+    }
+    /* 排障时外部 `> 日志` 截断后句柄仍停在旧偏移，会写出一段 \0 空洞 → 回卷 */
+    struct stat st;
+    if (fstat(fileno(f), &st) == 0 && st.st_size < ftell(f)) {
+        fseek(f, 0, SEEK_SET);
+        ftruncate(fileno(f), 0);
+    }
     /* 统一格式: YYYY-MM-DD HH:MM:SS.mmm（点后 3 位为毫秒） */
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -632,10 +651,11 @@ static void dbg_log(const char* fmt, ...)
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
     va_list ap;
     va_start(ap, fmt);
+    flockfile(f);
     fprintf(f, "%s.%03ld ", ts, (long)tv.tv_usec / 1000);
     vfprintf(f, fmt, ap);
-    fprintf(f, "\n");
-    fclose(f);
+    fputc('\n', f);
+    funlockfile(f);
     va_end(ap);
 }
 
@@ -699,9 +719,6 @@ static void* recv_loop(void* arg)
                     dbg_log("收到 commit: %s", text ? text : "(null)");
                     if (text)
                         schedule_msg(im, 2, text);
-                } else if (strstr(line, "\"started\"")) {
-                    dbg_log("收到 started: 服务端已开始录音（含自动续录）");
-                    schedule_msg(im, 4, NULL);
                 } else if (strstr(line, "\"done\"")) {
                     dbg_log("收到 done: %s", line);
                     /* 会话结束（服务端自动停止：60s 上限/静音超时/连接断开）——
@@ -773,9 +790,6 @@ static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
     dbg_log("filter press sym=%lu ctrl=%d alt=%d shift=%d recording=%d", (unsigned long)sym,
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
-    /* 非 Shift 键按下 → 取消"Shift 单独按下"标记 */
-    if (!is_shift(sym))
-        im->shift_solo = false;
     /* 非 Ctrl 键按下 → 取消"Ctrl 单独按下"标记（Ctrl+C 等组合键不切草稿） */
     if (!is_ctrl(sym))
         im->ctrl_solo = false;
@@ -793,10 +807,11 @@ static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
     }
     if (is_shift(sym)) {
         im->shift_down = true;
-        im->shift_solo = true;
         /* 按住说话组合 + Shift 三键齐按：空闲时切草稿（松手触发）。
            组合本身已含 Shift 时不存在三键语义，直接走正常 arm。 */
-        if (im->ptt_key == 0 && !(im->ptt_mods & MOD_SHIFT)
+        /* 只在空闲时成立：录音中补按 Shift（例如 A 模式下要打大写）不该让松手
+           变成"切草稿"，否则后半段识别内容会静默转到草稿窗 */
+        if (!im->recording && im->ptt_key == 0 && !(im->ptt_mods & MOD_SHIFT)
             && im_mods(im) == (im->ptt_mods | MOD_SHIFT)) {
             im->tri_pressed = true;
             im->armed = false;
@@ -895,7 +910,6 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
             toggle_draft(im);
         }
         im->shift_down = false;
-        im->shift_solo = false;
     }
     else if (sym == FcitxKey_Escape)
         im->esc_pressed = false;

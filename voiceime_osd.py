@@ -110,6 +110,8 @@ class OSD:
                 break
             try:
                 msg = json.loads(data.decode("utf-8", "replace"))
+                if not isinstance(msg, dict):   # 非对象报文会让 .get 抛异常打死 timeout
+                    continue
             except Exception:
                 continue
             if msg.get("type") == "show":
@@ -143,7 +145,11 @@ class OSD:
                 return False
             elif "rms" in msg:
                 self.have_rms = True
-                self.target_rms = max(0, int(msg["rms"]))
+                try:
+                    rms = int(msg["rms"])
+                except (TypeError, ValueError):
+                    rms = 0
+                self.target_rms = max(0, rms)
                 self.last_data = time.monotonic()
                 self.show()
         if (self.visible and self.have_rms

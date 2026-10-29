@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -66,15 +67,20 @@ def load_cfg():
     return json.loads(CONFIG.read_text(encoding="utf-8"))
 
 
+_CFG_LOCK = threading.Lock()   # ThreadingHTTPServer：并发保存会交错覆盖同一个 .tmp
+
+
 def save_cfg(cfg):
     """原子写盘；先备份当前配置到 .bak"""
-    try:
-        BACKUP.write_text(json.dumps(load_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    tmp = CONFIG.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(CONFIG)
+    with _CFG_LOCK:
+        try:
+            BACKUP.write_text(json.dumps(load_cfg(), ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+        except Exception:
+            pass
+        tmp = CONFIG.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(CONFIG)
 
 
 def deep_merge(dst, src):
@@ -132,6 +138,19 @@ def sanitize(patch):
                             if kk in ("width", "height", "y_ratio") and isinstance(vv, (int, float))}
         else:
             errors.append(f"未知键: {k}")
+    # 数值范围：越界值进 config.json 后会被核心服务拿去做除数/超时/缓冲长度
+    RANGES = {
+        "sample_rate": (8000, 48000),
+        "chunk_ms": (20, 1000),
+        "hold_ms": (50, 5000),
+        "silence_rms_threshold": (0, 32000),
+        "silence_timeout_sec": (0, 3600),
+        "silence_after_input_sec": (0, 3600),
+    }
+    for k, (lo, hi) in RANGES.items():
+        v = clean.get(k)
+        if v is not None and not (lo <= v <= hi):
+            errors.append(f"{k}: 应在 {lo}~{hi} 之间（当前 {v}）")
     for k in ("ptt_keys", "hold_keys"):
         if k in clean and not valid_combo(clean[k]):
             errors.append(f"{k}: 必须包含 ctrl/alt/shift 修饰键，可加一个普通键，如 ctrl+alt 或 ctrl+alt+space")
@@ -988,7 +1007,7 @@ class Handler(BaseHTTPRequestHandler):
                 import urllib.parse
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 name = (q.get("name") or ["service"])[0]
-                n = int((q.get("n") or ["100"])[0])
+                n = min(max(int((q.get("n") or ["100"])[0]), 1), 2000)
                 self._send(200, json.dumps({"log": tail_log(name, n)}))
             elif self.path.startswith("/api/history"):
                 import urllib.parse
@@ -1000,8 +1019,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send(500, json.dumps({"error": str(e)}))
 
+    def _cross_site(self):
+        """本机浏览器里任意网页都能 POST 到 19530（no-cors 即可），只放行配置台自己的来源"""
+        origin = self.headers.get("Origin") or ""
+        if not origin:
+            return False
+        return not origin.startswith(("http://127.0.0.1:%d" % PORT,
+                                      "http://localhost:%d" % PORT))
+
     def do_POST(self):
         try:
+            if self._cross_site():
+                self._send(403, json.dumps({"error": "跨站请求已拒绝"}))
+                return
             if self.path == "/api/config":
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 if body.get("rollback"):

@@ -147,6 +147,8 @@ class Draft:
                 break
             try:
                 msg = json.loads(data.decode("utf-8", "replace"))
+                if not isinstance(msg, dict):   # 合法 JSON 但不是对象会让下面的 .get 抛异常
+                    continue                    # 打死这个 GLib timeout，窗口从此不刷新
             except Exception:
                 continue
             t = msg.get("type")
@@ -235,14 +237,16 @@ class Draft:
         """按服务端消息刷新：定稿句永久追加、interim 做可替换尾巴。
         全程只动文末，绝不 set_text 全量重建——用户的光标位置和手动编辑
         在识别流继续时保持不动。"""
+        # 必须先清掉上一条 interim 尾巴再追加：尾巴 mark 落在文末，反过来
+        # 会把刚追加的定稿句一起删掉（表现为每句定稿丢失）
+        if self.tail_mark is not None:
+            self._drop_tail()
         if self._pending_final:
             self._append_permanent(self._pending_final)
             self._pending_final = ""
         if self._pending_current:
             self._append_tail(self._pending_current)
             self._pending_current = ""
-        elif self.tail_mark is not None:
-            self._drop_tail()   # 定稿后清掉旧预览尾巴
         if self.buf_res.get_text(self.buf_res.get_start_iter(),
                                  self.buf_res.get_end_iter(), True).strip():
             self.buf_res.set_text("")   # 原文变化清掉旧优化结果（内容已变，结果过期）

@@ -149,7 +149,11 @@ class DoubaoASR:
                 if mtype == 0b1111:         # SERVER_ERROR_RESPONSE
                     code = struct.unpack(">i", p[:4])[0]
                     size = struct.unpack(">I", p[4:8])[0]
-                    self._error = f"服务端错误码 {code}"
+                    detail = p[8:8 + size].decode("utf-8", "replace").strip()
+                    # 协议层错误帧也记 server_error：service 靠它判断"重连无意义、终止会话"，
+                    # 只设 _error 会被当成可恢复错误，导致一轮接一轮的建连重试
+                    self.server_error = (code, detail)
+                    self._error = f"服务端错误 {code}" + (f": {detail}" if detail else "")
                     log.error("%s", self._error)
                     self._completed.set()
                     break
@@ -178,11 +182,10 @@ class DoubaoASR:
                     self._completed.set()
                     break
         except Exception as e:
-            # 服务端正常结束流（收到负 seq 末包后 close(1000)）不算错误
-            if not isinstance(e, ConnectionClosed):
-                if not self._completed.is_set():
-                    self._error = f"接收线程异常: {e}"
-                    log.error("%s", self._error)
+            # 收到末包后服务端 close(1000) 属正常收尾；未收到末包就断开才算异常
+            if not self._completed.is_set():
+                self._error = f"接收线程异常: {e}"
+                log.error("%s", self._error)
             self._completed.set()
 
     def _handle(self, obj, is_last=False):
@@ -234,9 +237,9 @@ class DoubaoASR:
         live = [u["text"].strip() for u in utts
                 if not u.get("definite") and u.get("text", "").strip()]
         if not live:
-            text = r.get("text") or ""
-            if text.strip() and not utts:
-                live = [text.strip()]
+            text = (r.get("text") or "").strip()
+            if text:
+                live = [text]      # utts 存在但没有未定稿句时，用 result.text 作 preedit
         if live:
             text = live[-1]
             if text != self._last_interim:
@@ -266,12 +269,12 @@ class DoubaoASR:
                 pass
         self._completed.wait(timeout=timeout)
         self.close()
-        # 兜底：没有任何定稿句，但流里收到过文本（服务端直接关流、末包不带
-        # is_last 的情况）→ 用最后一份文本作为整段结果，避免"识别了却不上屏"
-        if not self.finals:
-            fallback = self._last_text or self._last_interim
-            if fallback:
-                self.finals.append(fallback)
+        # 兜底：流里收到过文本但没走完定稿（服务端直接关流、末包不带 is_last，
+        # 或末句还停在 interim 就被掐断）→ 补一条，避免最后一句整段丢失。
+        # 已经出现在某条定稿句里（互为子串）就不补，防止重复上屏。
+        last = self._last_text or self._last_interim
+        if last and not any(last in f or f in last for f in self.finals):
+            self.finals.append(last)
         return self.finals
 
     def close(self):

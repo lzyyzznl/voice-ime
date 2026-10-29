@@ -113,9 +113,12 @@ class Recorder(threading.Thread):
             self._buf_cv.notify_all()
 
     def flush_pending(self):
-        """新连接接管后等待积压音频发完（sender 自动等待 target 就绪）"""
+        """新连接接管后等待积压音频发完（sender 自动等待 target 就绪）。
+        没有发送目标时队列本来就发不出去，直接返回——否则会白等满超时
+        （表现为"按下就松手"要 5 秒才收到 done）。"""
         with self._buf_cv:
-            self._buf_cv.wait_for(lambda: not self._buf, timeout=5)
+            self._buf_cv.wait_for(
+                lambda: not self._buf or self._target is None, timeout=5)
 
     def _dispatch(self, chunk):
         """只入队，永不阻塞录音线程"""
@@ -133,13 +136,15 @@ class Recorder(threading.Thread):
                     self._buf_cv.wait(0.2)
                 chunk = self._buf[0]
                 gen = self._buf_gen
-            # 等目标就绪（切换窗口期间音频留在队列里）
+            # 等目标就绪（切换窗口期间音频留在队列里）。用条件变量而非 20ms 轮询：
+            # 预热流空闲时长期停在这里，轮询等于常驻 50Hz 唤醒白耗 CPU。
             while True:
                 with self._route_lock:
                     t = self._target
                 if t is not None or self._stop_evt.is_set():
                     break
-                time.sleep(0.02)
+                with self._buf_cv:
+                    self._buf_cv.wait(0.5)   # route_to() 会 notify_all
             if t is None:          # 已停止且无目标：丢弃剩余
                 return
             with self._buf_cv:
@@ -188,7 +193,18 @@ class Recorder(threading.Thread):
                     self.ready_evt.set()   # 浮窗据此从"未就绪"切到可说话
                     log.info("录音流就绪（首块音频 %.0f ms）", (time.time() - t0) * 1000)
                 if not chunk:
+                    # parec 意外退出（设备被拔、音频后端重启）：不回调的话会话会一直
+                    # 卡在"录音中"，要等 300s 兜底轮换才复位
+                    if not self._stop_evt.is_set():
+                        log.warning("录音流意外结束（parec 退出）")
+                        if self.on_died:
+                            try:
+                                self.on_died()
+                            except Exception as e:
+                                log.warning("录音流结束回调异常: %s", e)
                     break
+                if len(chunk) & 1:                 # 收尾时可能读到奇数长度的 s16le 残片
+                    chunk = chunk[:-1]             # 不裁会让下面的 frombytes 抛 ValueError
                 self._dispatch(chunk)
                 # RMS 计算：浮窗声波动画（on_rms）+ 静音超时自动停止
                 samples = array.array("h")
@@ -225,7 +241,7 @@ class Recorder(threading.Thread):
                     self._proc.kill()
 
     def configure(self, silence_timeout_sec=0, on_silence=None, silence_after_input_sec=0,
-                  on_rms=None, on_send_fail=None, rms_threshold=300):
+                  on_rms=None, on_send_fail=None, rms_threshold=300, on_died=None):
         """按会话装配本轮参数。预热流常驻，参数每轮重新装配；空闲时传全默认 = 复位。"""
         self.silence_timeout_sec = silence_timeout_sec
         self.on_silence = on_silence
@@ -233,6 +249,7 @@ class Recorder(threading.Thread):
         self.on_rms = on_rms
         self.on_send_fail = on_send_fail
         self.rms_threshold = rms_threshold
+        self.on_died = on_died
         self._silence_ms = 0
         self._heard_speech = False
 
@@ -403,31 +420,34 @@ class VoiceIMEService:
 
     def broadcast(self, obj):
         with self.clients_lock:
-            for send in list(self.clients):
-                try:
-                    send(obj)
-                except Exception:
-                    pass
+            targets = list(self.clients)   # 快照后解锁：sendall 可能阻塞，不能占着全局锁
+        for send in targets:
+            try:
+                send(obj)
+            except Exception:
+                pass
 
     # ── 托盘（voiceime_tray.py）状态推送 ──
     def _tray_state(self):
         """向托盘订阅者推送录音状态（全局是否在录音）"""
         with self.clients_lock:
             rec = self._rec_count > 0
-            for s in list(self.observers):
-                try:
-                    s.send({"type": "tray", "recording": rec})
-                except Exception:
-                    pass
+            targets = list(self.observers)
+        for s in targets:
+            try:
+                s.send({"type": "tray", "recording": rec})
+            except Exception:
+                pass
 
     def _tray_rms(self, r):
         """向托盘订阅者推送实时音量（驱动图标声波动画）"""
         with self.clients_lock:
-            for s in list(self.observers):
-                try:
-                    s.send({"type": "tray_rms", "r": r})
-                except Exception:
-                    pass
+            targets = list(self.observers)
+        for s in targets:
+            try:
+                s.send({"type": "tray_rms", "r": r})
+            except Exception:
+                pass
 
     def _tray_im(self, active):
         """向托盘订阅者推送输入法激活状态（图标随输入法切换：麦克风/键盘）"""
@@ -693,6 +713,11 @@ class VoiceIMEService:
                 threading.Thread(target=self.switch_session,
                                  args=(session, session.generation), daemon=True).start()
 
+            def on_died():
+                # parec 意外退出：按停止收尾，否则引擎永远停在"录音中"
+                threading.Thread(target=self.stop_session,
+                                 args=(session,), daemon=True).start()
+
             # 录音流：默认复用常驻预热流——parec 从启动到首块音频要 1.1 秒
             # （xrdp 音频源冷启动，各种采样率/缓冲参数都一样），这段时间麦克风
             # 根本没在采，用户看到浮窗就开口，开头一两个字必丢。
@@ -702,7 +727,8 @@ class VoiceIMEService:
                           rms_threshold=rms_threshold,
                           silence_after_input_sec=after_input_sec,
                           on_rms=self._on_rms,
-                          on_send_fail=on_send_fail)
+                          on_send_fail=on_send_fail,
+                          on_died=on_died)
             rec.clear_buffer()     # 预热期（按键前）采到的音频不上送
             rec.route_to(None)     # 暂存音频，等 ASR 接管后 flush_pending 补发
             session.rec = rec
@@ -755,6 +781,12 @@ class VoiceIMEService:
                 return
             session.asr = asr
             rec = session.rec
+            cancelled = session.cancel_pending
+        if cancelled:
+            log.info("握手完成时用户已松手，直接收尾")
+            threading.Thread(target=self.stop_session, args=(session, gen, False),
+                             daemon=True).start()
+            return
         if getattr(asr, "server_error", None):
             # 握手阶段就被拒（如 503 SERVER_BUSY）：别把死连接挂上录音流再去撞发送失败
             srv_err = asr.server_error
@@ -1039,8 +1071,15 @@ class VoiceIMEService:
                 # 含 60s 切换空窗期 asr=None 但 rec 在录音的情况）
                 threading.Thread(target=self.stop_session, args=(session,), daemon=True).start()
             else:
-                # 非录音连接（托盘菜单"停止录音"）：全局停止当前所有录音会话
-                self.stop_all()
+                with self.clients_lock:
+                    is_observer = session in self.observers
+                if is_observer:
+                    # 托盘菜单"停止录音"：非录音连接，全局停止当前所有录音会话
+                    self.stop_all()
+                else:
+                    # 引擎连接但 start 还没装配完：装配完成后会自行收尾，
+                    # 这里只回 done 让引擎复位，绝不能连带停掉别人的会话
+                    session.send({"type": "done"})
         elif cmd == "cancel":
             threading.Thread(target=self.cancel_session, args=(session,), daemon=True).start()
         elif cmd == "subscribe":

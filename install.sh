@@ -17,7 +17,8 @@ case "$1" in
     --check|-c) CHECK_ONLY=1;;
 esac
 
-echo "voice-ime 一键安装"
+PKG_VER="$(cat VERSION 2>/dev/null || echo 未知)"
+echo "voice-ime 安装/更新  版本 $PKG_VER"
 echo "==================="
 echo "代码目录: $APP_DIR"
 echo "systemd : $UNIT_DIR"

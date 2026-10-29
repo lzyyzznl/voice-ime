@@ -56,6 +56,8 @@ voice-ime/
 ├── install.sh               # 一键安装（依赖→引擎→图标→systemd 单元→启动）
 ├── config.example.json      # 配置模板（凭证占位，不入库）
 ├── config.json              # 真实配置（含密钥，不入库，gitignore）
+├── eval_set.json            # 润色提示词评估集
+├── eval_optimizer.py        # 跑评估集算 PASS 率，对比提示词改动效果
 └── logs/                    # 运行时日志（voiceime-*.log）
 ```
 
@@ -126,7 +128,7 @@ voice-ime/
 ## 构建与安装（详见 INSTALL.md）
 
 ```bash
-cd /home/0668001050/software/voice-ime
+cd ~/workspace/voice-ime
 ./install.sh                 # 依赖→引擎→图标→systemd 单元→启动→验证
 ```
 
@@ -144,7 +146,7 @@ journalctl --user -u voiceime-core -f      # 跟随日志
 ## 调试
 
 ```bash
-cd /home/0668001050/software/voice-ime
+cd ~/workspace/voice-ime
 tail -f logs/voiceime-engine.log    # 引擎：按键、preedit/commit
 tail -f logs/voiceime-service.log   # core：命令/录音/识别/润色耗时
 tail -f logs/voiceime-osd.log       # 浮窗

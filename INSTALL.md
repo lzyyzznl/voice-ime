@@ -23,7 +23,7 @@ ZTE 内网环境的语音输入插件：**按住 Ctrl+Alt 说话 → 松开即�
 ### 3.1 定位代码目录
 
 ```bash
-cd /home/0668001050/software/voice-ime
+cd ~/workspace/voice-ime
 ```
 
 ### 3.2 环境检测
@@ -124,7 +124,7 @@ curl -s http://127.0.0.1:19530/api/state | head -c 200
 | **Ctrl+Alt+Tab** | 切换默认录音模式（两个组合已各自固定模式，一般用不到） |
 | 录音中单按 Ctrl（A）/ 空闲 Ctrl+Alt+Shift（B） | 切换草稿模式（内容进草稿窗） |
 | 说话 | 停顿 500ms 自动定稿；`auto_polish` 开则先润色再上屏 |
-| 超长说话 | 60s 自动无缝续录（录音不断、内容零丢失） |
+| 超长说话 | 300s 兜底续录（录音不断、内容零丢失；实测 30s 单会话无截断） |
 
 ## 5. 服务运维
 
@@ -158,7 +158,7 @@ tail -f logs/voiceime-osd.log       # 浮窗
 ## 7. 卸载
 
 ```bash
-cd /home/0668001050/software/voice-ime/fcitx-engine && sudo make uninstall
+cd ~/workspace/voice-ime/fcitx-engine && sudo make uninstall
 systemctl --user disable --now voiceime-core voiceime-osd voiceime-draft voiceime-web
 rm -f ~/.config/systemd/user/voiceime-*.service && systemctl --user daemon-reload
 ```

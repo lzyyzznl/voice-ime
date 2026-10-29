@@ -6,7 +6,7 @@ GLIB_LIBS := $(shell pkg-config --libs glib-2.0)
 # 引擎调试日志写到应用目录 logs/（voice-ime/logs/voiceime-engine.log），编译时注入
 CFLAGS = $(FCITX_CFLAGS) $(GLIB_CFLAGS) -O2 -fPIC -Wall -Wextra \
          -DENGINE_LOG_PATH=\"$(abspath $(CURDIR)/..)/logs/voiceime-engine.log\"
-LDFLAGS = -shared -lpthread $(GLIB_LIBS) -lfcitx-core
+LDFLAGS = -shared -lpthread $(GLIB_LIBS) -lfcitx-core -lX11
 
 all: fcitx-voiceime.so
 

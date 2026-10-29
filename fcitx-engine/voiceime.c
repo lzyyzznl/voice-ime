@@ -36,6 +36,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
 
 #define SOCKET_PATH   "/tmp/voiceime-service.sock"
 #define RECV_LINE_MAX 16384
@@ -152,9 +154,13 @@ struct _VoiceIM {
     boolean armed_hold;             /* 本次 armed 的目标模式：true=持续 A */
     struct timespec press_time;     /* Ctrl+Alt 同时按下的时刻 */
     volatile gboolean recv_running;
+    long long last_reconnect_ms;    /* 上次重连时间（poll_queue_cb 限速用） */
     GThread* recv_thread;
     GAsyncQueue* queue;             /* recv_thread → 主循环 消息队列（线程安全） */
+    boolean mods_dirty;             /* 本轮 Ctrl/Alt 按住期间夹了组合外的键 → 本轮禁止触发 */
     FcitxInputContext* last_ic;     /* 上一轮轮询的焦点上下文（检测失焦，替代 IM OnClose） */
+    Display* xdpy;                  /* 独立 X 连接：读物理键盘状态（不受 grab 影响，懒打开） */
+    long long last_phys_check_ms;   /* 物理键检查限速（录音期每 200ms 一次） */
 };
 static int im_mods(VoiceIM* im)
 {
@@ -163,6 +169,84 @@ static int im_mods(VoiceIM* im)
     if (im->alt_down)   m |= MOD_ALT;
     if (im->shift_down) m |= MOD_SHIFT;
     return m;
+}
+
+/* ── 物理键盘状态（XQueryKeymap）────────────────────────────────
+ * 全局快捷键（iCenter 的 Ctrl+Alt+Z 等）会 grab 键盘：X 键事件不再送到
+ * fcitx，press/release 双双丢失。于是 filter 看到「Ctrl+Alt 一直按着」，
+ * 300ms 后误触发录音，松手也收不到 release，录音永远挂住（只能 Esc）。
+ * XQueryKeymap 直接读服务器端键位掩码，不受 grab 影响，用它兜底。 */
+static Display* phys_display(VoiceIM* im)
+{
+    if (!im->xdpy)
+        im->xdpy = XOpenDisplay(NULL);
+    return im->xdpy;
+}
+
+static boolean phys_key_down(Display* dpy, const char* keys, KeySym sym)
+{
+    KeyCode kc = XKeysymToKeycode(dpy, sym);
+    return kc && (keys[kc >> 3] & (1 << (kc & 7)));
+}
+
+/* 组合外的键是否按着 → 这串按键是别的程序的快捷键（Ctrl+Alt+X），不是语音组合 */
+static boolean phys_extra_keys_down(VoiceIM* im)
+{
+    Display* dpy = phys_display(im);
+    char keys[32];
+    KeyCode skip[8];
+    int n = 0, i, c;
+
+    if (!dpy)
+        return false;
+    XQueryKeymap(dpy, keys);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Control_L);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Control_R);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Alt_L);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Alt_R);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Shift_L);
+    skip[n++] = XKeysymToKeycode(dpy, XK_Shift_R);
+    /* 组合自身的普通键（如 ctrl+alt+space 的 space）不算「额外」 */
+    if (im->hold_key && n < 8)
+        skip[n++] = XKeysymToKeycode(dpy, (KeySym)im->hold_key);
+    if (im->ptt_key && n < 8)
+        skip[n++] = XKeysymToKeycode(dpy, (KeySym)im->ptt_key);
+
+    for (c = 8; c < 256; c++) {
+        boolean hit = false;
+        if (!(keys[c >> 3] & (1 << (c & 7))))
+            continue;
+        for (i = 0; i < n; i++)
+            if (skip[i] == c)
+                hit = true;
+        if (!hit)
+            return true;
+    }
+    return false;
+}
+
+/* 组合的修饰键是否仍物理按下 */
+static boolean phys_mods_held(VoiceIM* im, int mods)
+{
+    Display* dpy = phys_display(im);
+    char keys[32];
+
+    if (!dpy)
+        return true;   /* 查不到就当还按着，绝不误停 */
+    XQueryKeymap(dpy, keys);
+    if ((mods & MOD_CTRL)
+        && !phys_key_down(dpy, keys, XK_Control_L)
+        && !phys_key_down(dpy, keys, XK_Control_R))
+        return false;
+    if ((mods & MOD_ALT)
+        && !phys_key_down(dpy, keys, XK_Alt_L)
+        && !phys_key_down(dpy, keys, XK_Alt_R))
+        return false;
+    if ((mods & MOD_SHIFT)
+        && !phys_key_down(dpy, keys, XK_Shift_L)
+        && !phys_key_down(dpy, keys, XK_Shift_R))
+        return false;
+    return true;
 }
 
 /* press 判定（严格）：按下的键必须属于组合。纯修饰组合要求修饰键恰好齐全，
@@ -199,7 +283,7 @@ static void stop_recording_on_lost_focus(VoiceIM* im);  /* 前向声明（poll_q
    按下扩展普通键即升级为持续模式。 */
 static void arm_review_combo(VoiceIM* im, FcitxKeySym sym)
 {
-    if (im->triggered)
+    if (im->triggered || im->mods_dirty)
         return;
     if (combo_match(im, im->hold_mods, im->hold_key, sym)) {
         im->armed = true;
@@ -258,6 +342,25 @@ static void stop_recv_then_close(VoiceIM* im, int fd)
         close(fd);
 }
 
+/* 断连/重连后复位状态机：断连期间会丢掉服务端的 started / done 消息，
+   若不复位，triggered 可能永久卡在 TRUE —— 而 arm_review_combo 第一行就是
+   if (triggered) return，之后对任何组合键都没反应（症状："按什么键都呼不
+   出来"，只能 fcitx -r 恢复）。 */
+static void reset_stream_state(VoiceIM* im)
+{
+    im->armed = false;
+    im->triggered = false;
+    im->recording = false;
+    im->ctrl_down = false;
+    im->alt_down = false;
+    im->shift_down = false;
+    im->ctrl_solo = false;
+    im->shift_solo = false;
+    im->tri_pressed = false;
+    im->esc_pressed = false;
+    im->active_key = 0;
+}
+
 static void send_cmd(VoiceIM* im, const char* json)
 {
     pthread_mutex_lock(&im->send_lock);
@@ -276,6 +379,7 @@ static void send_cmd(VoiceIM* im, const char* json)
             stop_recv_then_close(im, im->sock);
             im->sock = -1;
             if (connect_service(im)) {   /* 复用 fd 号时旧线程已结束，无竞态 */
+                reset_stream_state(im);  /* 断连丢了 done/started，复位防卡死 */
                 write(im->sock, json, strlen(json));
                 write(im->sock, "\n", 1);
                 im->recv_running = TRUE;
@@ -359,6 +463,27 @@ static void poll_queue_cb(void* data)
     VoiceIM* im = data;
     VoiceMsg* m;
 
+    /* 接收线程已退出（core 重启/崩溃/连接被重置）→ 主动重连。
+       原先只有 send_cmd 写失败时才重连，而 core 重启后没人发命令 → 引擎
+       永久失联：按键照常打 filter 日志，但 start 永远发不出去（表现为
+       "按什么键都呼不出来"，只能 fcitx -r）。限速 1 秒一次。 */
+    if (!im->recv_running && im->sock >= 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long long now_ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (now_ms - im->last_reconnect_ms > 1000) {
+            im->last_reconnect_ms = now_ms;
+            dbg_log("接收线程已退出，重连服务端");
+            stop_recv_then_close(im, im->sock);
+            im->sock = -1;
+            if (connect_service(im)) {
+                reset_stream_state(im);   /* 断连丢了 done/started，复位防卡死 */
+                im->recv_running = TRUE;
+                im->recv_thread = g_thread_new("voiceime-ipc", recv_loop, im);
+            }
+        }
+    }
+
     /* 焦点变化检测（替代原 IM OnClose）：IC 变了视为失焦，停录并清 preedit。
        Cancel 语义见 stop_recording_on_lost_focus 注释。 */
     {
@@ -382,22 +507,57 @@ static void poll_queue_cb(void* data)
         long ms = (now.tv_sec - im->press_time.tv_sec) * 1000
                 + (now.tv_nsec - im->press_time.tv_nsec) / 1000000;
         if (ms >= im->hold_ms) {
-            im->armed = false;
-            im->triggered = true;   /* 防 repeat：需全部释放后才重置 */
-            im->ctrl_solo = false;  /* 触发即清 solo：长按松手（Ctrl 后按时）不误切草稿 */
-            im->shift_solo = false; /* 同上：不误切录音模式 */
-            if (!im->recording) {
-                im->recording = true;
-                im->mode_b = !im->armed_hold;   /* hold 组合 → 持续 A，否则对讲机 B */
-                send_cmd(im, im->mode_b
-                              ? "{\"cmd\":\"mode\",\"b\":1}"
-                              : "{\"cmd\":\"mode\",\"b\":0}");
-                dbg_log("长按触发 start（%s）", im->mode_b ? "对讲机 B" : "持续 A");
-                send_cmd(im, "{\"cmd\":\"start\"}");
-                /* 录音指示由桌面浮窗（声波动画）呈现，不再显示文字 */
+            /* 防「Ctrl+Alt+X 类全局快捷键」误触发，三个守卫：
+               1) 本轮夹过组合外的键（事件路径就能看到，最可靠）；
+               2) 组合外还有键按着（iCenter 的 Ctrl+Alt+Z：X 键事件被对方 grab，
+                  filter 收不到 Z，只能靠 XQueryKeymap 看到）；
+               3) 当前没有输入上下文（弹窗夺走焦点）→ 录了也无处上屏。 */
+            boolean extra = phys_extra_keys_down(im);
+            if (im->mods_dirty || extra || !FcitxInstanceGetCurrentIC(im->owner)) {
+                dbg_log("长按判定撤销（dirty=%d 组合外按键=%d 有输入上下文=%d）",
+                        im->mods_dirty, extra, FcitxInstanceGetCurrentIC(im->owner) != NULL);
+                im->armed = false;
+                im->tri_pressed = false;
+            } else {
+                im->armed = false;
+                im->triggered = true;   /* 防 repeat：需全部释放后才重置 */
+                im->ctrl_solo = false;  /* 触发即清 solo：长按松手（Ctrl 后按时）不误切草稿 */
+                im->shift_solo = false; /* 同上：不误切录音模式 */
+                if (!im->recording) {
+                    im->recording = true;
+                    im->mode_b = !im->armed_hold;   /* hold 组合 → 持续 A，否则对讲机 B */
+                    send_cmd(im, im->mode_b
+                                  ? "{\"cmd\":\"mode\",\"b\":1}"
+                                  : "{\"cmd\":\"mode\",\"b\":0}");
+                    dbg_log("长按触发 start（%s）", im->mode_b ? "对讲机 B" : "持续 A");
+                    send_cmd(im, "{\"cmd\":\"start\"}");
+                    /* 录音指示由桌面浮窗（声波动画）呈现，不再显示文字 */
+                }
             }
         }
     }
+
+    /* 松开兜底：全局快捷键 grab / 焦点切换会让 release 事件丢失，录音会一直挂着
+       （表现为「松手不消失，只能 Esc」）。直接读物理键盘状态判定触发键是否已松开。
+       仅对讲机 B：A 模式本来就靠 Esc / 再按组合停止。 */
+    if (im->recording && im->mode_b && im->triggered) {
+        struct timespec now;
+        long long now_ms;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        now_ms = (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+        if (now_ms - im->last_phys_check_ms >= 200) {
+            im->last_phys_check_ms = now_ms;
+            if (!phys_mods_held(im, im->ptt_mods)) {
+                dbg_log("触发键已物理松开（release 丢失），停止并提交");
+                stop_and_submit(im);
+            }
+        }
+    }
+
+    /* 「本轮污染」标记的兜底清除：release 被 grab 吃掉时 ctrl_down 会卡住 true，
+       仅靠 release filter 复位会让语音永久失效。物理键全松才查（罕见路径，无开销）。 */
+    if (im->mods_dirty && !phys_mods_held(im, MOD_CTRL | MOD_ALT | MOD_SHIFT))
+        im->mods_dirty = false;
 
     while ((m = g_async_queue_try_pop(im->queue)) != NULL) {
         dbg_log("poll_queue: type=%d text=%s", m->type, m->text ? m->text : "(null)");
@@ -650,6 +810,12 @@ static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
        自动重复会被打进当前输入框。组合未按满则透传，不影响正常打字。 */
     if (sym == im->ptt_key || sym == im->hold_key)
         im->active_key = sym;
+    /* 组合外的普通键：这轮 Ctrl/Alt 按住是别的程序的快捷键（Ctrl+Alt+Z 等），
+       本轮不再允许触发语音，直到修饰键全部松开。否则先按 Ctrl+Alt 再敲键，
+       长按判定照样在 hold_ms 后开工。 */
+    if (sym != im->ptt_key && sym != im->hold_key
+        && !im->triggered && (im->ctrl_down || im->alt_down))
+        im->mods_dirty = true;
     arm_review_combo(im, sym);
     if (combo_match(im, im->hold_mods, im->hold_key, sym)
         || combo_match(im, im->ptt_mods, im->ptt_key, sym)
@@ -744,6 +910,8 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
         im->armed = false;
         im->triggered = false;
         im->tri_pressed = false;   /* 组合未完成（先松了修饰键）也清，防悬挂 */
+        if (!im->ctrl_down && !im->alt_down && !im->shift_down)
+            im->mods_dirty = false;   /* 修饰键全松：下一轮重新判定 */
     }
     return false;
 }
@@ -846,6 +1014,8 @@ static void VoiceIMDestroy(void* arg)
     }
     pthread_mutex_destroy(&im->send_lock);
     g_async_queue_unref(im->queue);
+    if (im->xdpy)
+        XCloseDisplay(im->xdpy);
     g_voiceim = NULL;
     free(im);
 }

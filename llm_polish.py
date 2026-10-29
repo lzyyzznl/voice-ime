@@ -126,9 +126,28 @@ def _post(endpoint, body_bytes, timeout, auth=None):
     raise RuntimeError("请求失败")   # 不可达（逻辑上不会到这）
 
 
-def polish(cfg, text, context=None, timeout=None):
+GLOSSARY_HINT = ("\n\n【专有名词表】下面这些是用户工作里的专有名词。识别结果里若出现读音相近、但写法不同的片段"
+                 "（例如把 CoClaw 听成「可口可乐」或「call log」），必须改回下面给出的写法；"
+                 "没有音近片段就不要改动任何字。\n")
+
+
+def hotwords():
+    """config.json 的 doubao.hotwords（与 ASR 热词同一份）。读不到就当没有。"""
+    try:
+        d = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        ws = d.get("doubao", {}).get("hotwords") or []
+        return [str(w).strip() for w in ws if str(w).strip()]
+    except Exception:
+        return []
+
+
+def polish(cfg, text, context=None, timeout=None, glossary="auto"):
     """润色 text（context 为上文原句列表），返回润色后的文本。
-    失败抛异常，调用方负责降级为原文。"""
+    失败抛异常，调用方负责降级为原文。
+
+    glossary：专有名词表（音近纠正）。默认 "auto" = 用 config.json 的 doubao.hotwords，
+    传 None/[] 则不启用，传 list 用该表 —— 与 ASR 热词共用一份配置。
+    """
     endpoint = (cfg.get("endpoint") or "").strip()
     if not endpoint:
         raise RuntimeError("未配置 llm.endpoint")
@@ -142,6 +161,11 @@ def polish(cfg, text, context=None, timeout=None):
     messages = [{"role": "user",
                  "content": (prompt + "\n" + body_text) if prompt else body_text}]
     system_prompt = (cfg.get("system_prompt") or "").strip()
+    if glossary == "auto":
+        glossary = hotwords()
+    if glossary:
+        system_prompt = (system_prompt + GLOSSARY_HINT
+                         + "、".join(dict.fromkeys(map(str, glossary)))).strip()
     if system_prompt:
         messages.insert(0, {"role": "system", "content": system_prompt})
     body = {

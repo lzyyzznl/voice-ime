@@ -388,7 +388,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <p class="card-desc" style="margin:16px 0 10px">热词<span style="color:var(--faint)"> · 谐音误识 / 专业术语 / 内部系统名，随每次识别一起发给豆包</span></p>
     <div class="f in-mono"><label for="hotwords">热词（一行一个，也可逗号分隔）</label>
       <textarea id="hotwords" rows="4" spellcheck="false" placeholder="康飞格&#10;influxdb&#10;jieba&#10;ASR 热词"></textarea>
-      <p class="fa">写进来的词会作为豆包 <code>corpus.context.hotwords</code> 直传（优先于控制台词表，不用建表）。二遍定稿下最多 5000 个词，一般写几十个常用的就够了；纯英文词、大小写敏感的标识符也可以写。保存后下一句录音即生效。</p></div>
+      <p class="fa">写进来的词会作为豆包 <code>corpus.context.hotwords</code> 直传（优先于控制台词表，不用建表），同时作为润色阶段的专有名词表：ASR 热词只在「音近」时替换，被听成通顺的常见词（如 CoClaw → 可口可乐）不一定纠，开着「自动润色」时会把这类音近片段改回这里的写法。二遍定稿下最多 5000 个词，一般写几十个常用的就够了；纯英文词、大小写敏感的标识符也可以写。保存后下一句录音即生效。</p></div>
   </section>
 
   <section class="card">

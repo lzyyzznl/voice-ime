@@ -246,8 +246,10 @@ body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.6 var(--sans)
 .f{display:flex;flex-direction:column;gap:5px;min-width:0}
 .f.wide{grid-column:1/-1}
 .f label{font:11px/1 var(--mono);color:var(--ink2);letter-spacing:.04em}
+.f .fa{margin:0;font:10.5px/1.55 var(--mono);color:var(--muted)}
 input,select,textarea{width:100%;background:var(--paper);border:2px solid var(--ink);color:var(--ink);
   padding:7px 10px;font:inherit;font-size:13px;border-radius:0}
+input:disabled{opacity:.45;background:var(--paper);cursor:not-allowed}
 input:hover,select:hover,textarea:hover{border-color:var(--ink)}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline:none;border-color:var(--red);box-shadow:3px 3px 0 var(--red)}
 textarea{resize:vertical;min-height:110px;font-family:var(--mono);font-size:12px;line-height:1.7}
@@ -373,10 +375,13 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <label class="sw"><input type="checkbox" id="enable_nonstream"><span class="tr"></span><span class="n">二遍定稿</span><span class="d">enable_nonstream</span></label>
       <label class="sw"><input type="checkbox" id="show_utterances"><span class="tr"></span><span class="n">输出分段</span><span class="d">show_utterances</span></label>
     </div>
-    <div class="grid" style="margin-top:14px">
-      <div class="f in-mono"><label for="end_window_size">停顿判停 ms</label><input type="number" id="end_window_size" min="300" max="5000" step="100"></div>
-      <div class="f in-mono"><label for="force_to_speech_time">起音保护 ms</label><input type="number" id="force_to_speech_time" min="0" max="5000" step="100"></div>
-      <div class="f in-mono"><label for="accelerate_score">加速率 score</label><input type="number" id="accelerate_score" min="0" max="10"></div>
+    <div class="grid" style="margin-top:14px;align-items:start">
+      <div class="f in-mono"><label for="end_window_size">停顿判停 ms</label><input type="number" id="end_window_size" min="300" max="5000" step="100">
+        <p class="fa">句末静音持续到这里长就判定这句说完、立刻定稿上屏。<b>调小</b>响应更快，但容易把一口气切成好几句；<b>调大</b>句子更完整，上屏更迟。推荐 500–800，默认 800。</p></div>
+      <div class="f in-mono"><label for="force_to_speech_time">起音保护 ms</label><input type="number" id="force_to_speech_time" min="0" max="5000" step="100">
+        <p class="fa">开口后这段时间内不判停，防止开头的换气、停顿被误切成两句（只在开口后已有语音时起作用）。推荐 1000；一句话开头习惯停顿较久可调到 1500，短句多可降到 500。</p></div>
+      <div class="f in-mono"><label for="accelerate_score">加速率 score</label><input type="number" id="accelerate_score" min="0" max="10">
+        <p class="fa">「首字加速」的加速强度，0–10。<b>未勾选首字加速时不生效</b>（输入框置灰）。数值越大首字回来越快，识别精度可能略降。推荐 1–2，默认 0。</p></div>
     </div>
   </section>
 

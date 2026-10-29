@@ -669,6 +669,22 @@ class VoiceIMEService:
                 return
             session.asr = asr
             rec = session.rec
+        if getattr(asr, "server_error", None):
+            # 握手阶段就被拒（如 503 SERVER_BUSY）：别把死连接挂上录音流再去撞发送失败
+            srv_err = asr.server_error
+            log.error("ASR 服务端拒绝 %s %s，终止会话", srv_err[0], srv_err[1])
+            msg = "ASR 服务端拒绝: %s %s" % srv_err
+            if session.drafting:
+                self._draft_send({"type": "text", "mode": "interim", "text": msg})
+            else:
+                session.send({"type": "preedit", "text": msg})
+            try:
+                asr.close()
+            except Exception:
+                pass
+            threading.Thread(target=self.stop_session, args=(session, gen, False),
+                             daemon=True).start()
+            return
         rec.route_to(asr)      # 接管：先补发缓存音频，再实时发送
         rec.flush_pending()
 
@@ -725,6 +741,21 @@ class VoiceIMEService:
             except Exception as e:
                 log.warning("旧会话收尾异常: %s", e)
                 finals = []
+            srv_err = getattr(old_asr, "server_error", None)
+            if srv_err:
+                # 服务端明确拒绝（503 SERVER_BUSY / 鉴权失败）：重连必然同样失败。
+                # 继续切换会形成每 ~120ms 一轮的重试风暴（发送失败 → 切换 → 再失败），
+                # 一次说话里建连几十次，用户侧只看到"录完不出字"。直接终止并说明原因。
+                log.error("ASR 服务端拒绝 %s %s，终止会话（不重连）",
+                          srv_err[0], srv_err[1])
+                msg = "ASR 服务端拒绝: %s %s" % srv_err
+                if session.drafting:
+                    self._draft_send({"type": "text", "mode": "interim", "text": msg})
+                else:
+                    session.send({"type": "preedit", "text": msg})
+                threading.Thread(target=self.stop_session,
+                                 args=(session, new_gen, False), daemon=True).start()
+                return
             # stop 返回前 on_final 已同步处理完 finals（completed 在其后置位），重读最新
             # committed；若在 stop 前读旧值，on_final 刚提交的句会被 rem 再次提交 → 重复
             with session.lock:

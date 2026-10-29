@@ -96,6 +96,7 @@ class StreamingASR:
         self.interims = []        # 最近中间结果
         self._recv_thread = None
         self._completed = threading.Event()
+        self.server_error = None  # (status, message)：服务端明确拒绝（503/鉴权失败），重连无意义
         self._error = None
 
     # ── 生命周期 ──
@@ -168,6 +169,7 @@ class StreamingASR:
                     self._completed.set()
                     break
                 elif name == "Error":
+                    self.server_error = (h.get("status"), h.get("status_message"))
                     self._error = f"服务端错误: {h.get('status')} {h.get('status_message')}"
                     log.error("%s", self._error)
                     self._completed.set()

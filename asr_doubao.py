@@ -53,13 +53,17 @@ class DoubaoASR:
     """单次录音会话的豆包流式转写客户端（同步模型）。"""
 
     def __init__(self, api_key, resource_id="volc.seedasr.sauc.duration",
-                url=URL_ASYNC, sample_rate=16000, sample_width=2, request=None):
+                url=URL_ASYNC, sample_rate=16000, sample_width=2, request=None,
+                hotwords=None):
         self.api_key = api_key
         self.resource_id = resource_id
         self.url = url or URL_ASYNC
         self.sample_rate = sample_rate
         self.sample_width = sample_width
         self.request_overrides = request or {}   # config.doubao.request 覆盖默认参数
+        # 热词直传（config.doubao.hotwords）：豆包 corpus.context 的 hotwords 形式，
+        # 优先级高于自学习平台词表，不需要在控制台建表；二遍定稿（enable_nonstream）下支持 5000 词。
+        self.hotwords = [str(w).strip() for w in (hotwords or []) if str(w).strip()]
         self.ws = None
         self.finals = []                 # 定稿句文本（按序）
         self._nostream = "nostream" in (url or "")   # 单向流式：整句结果随 result.text 一次返回
@@ -88,6 +92,18 @@ class DoubaoASR:
         ctx.verify_mode = ssl.CERT_NONE   # 内网 HTTPS 拦截（自签证书）
         self.ws = connect(self.url, additional_headers=headers,
                           ssl=ctx, open_timeout=10)
+        payload = self._build_payload()
+        self._seq = 1
+        self.ws.send(_json_frame(0b0001, 0b0001, self._seq, payload))  # CLIENT_FULL_REQUEST, POS_SEQUENCE
+        self._seq = 2
+        self._on_interim = on_interim
+        self._on_final = on_final
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+        return self
+
+    def _build_payload(self):
+        """首包配置（含热词）。抽出来便于自检：不建连也能看实际发出去的 request。"""
         payload = {
             "user": {"uid": "voiceime"},
             "audio": {
@@ -108,14 +124,14 @@ class DoubaoASR:
                 **self.request_overrides,   # config.doubao.request 覆盖（Web 界面可调）
             },
         }
-        self._seq = 1
-        self.ws.send(_json_frame(0b0001, 0b0001, self._seq, payload))  # CLIENT_FULL_REQUEST, POS_SEQUENCE
-        self._seq = 2
-        self._on_interim = on_interim
-        self._on_final = on_final
-        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._recv_thread.start()
-        return self
+        # 热词：request_overrides 里显式给了 corpus 就以调用方为准
+        if self.hotwords and "corpus" not in payload["request"]:
+            payload["request"]["corpus"] = {
+                "context": json.dumps(
+                    {"hotwords": [{"word": w} for w in self.hotwords]},
+                    ensure_ascii=False)
+            }
+        return payload
 
     def _recv_loop(self):
         try:

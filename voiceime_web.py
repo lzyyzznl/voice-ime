@@ -104,6 +104,8 @@ def sanitize(patch):
                 continue
             if k == "doubao":
                 d = {kk: vv for kk, vv in v.items() if kk in ("api_key", "resource_id", "url", "request")}
+                if isinstance(v.get("hotwords"), list):
+                    d["hotwords"] = [s for s in (str(x).strip() for x in v["hotwords"]) if s]
                 if isinstance(v.get("request"), dict):
                     d["request"] = {kk: vv for kk, vv in v["request"].items()
                                     if isinstance(vv, (bool, int, str))}
@@ -383,6 +385,10 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <div class="f in-mono"><label for="accelerate_score">加速率 score</label><input type="number" id="accelerate_score" min="0" max="10">
         <p class="fa">「首字加速」的加速强度，0–10。<b>未勾选首字加速时不生效</b>（输入框置灰）。数值越大首字回来越快，识别精度可能略降。推荐 1–2，默认 0。</p></div>
     </div>
+    <p class="card-desc" style="margin:16px 0 10px">热词<span style="color:var(--faint)"> · 谐音误识 / 专业术语 / 内部系统名，随每次识别一起发给豆包</span></p>
+    <div class="f in-mono"><label for="hotwords">热词（一行一个，也可逗号分隔）</label>
+      <textarea id="hotwords" rows="4" spellcheck="false" placeholder="康飞格&#10;influxdb&#10;jieba&#10;ASR 热词"></textarea>
+      <p class="fa">写进来的词会作为豆包 <code>corpus.context.hotwords</code> 直传（优先于控制台词表，不用建表）。二遍定稿下最多 5000 个词，一般写几十个常用的就够了；纯英文词、大小写敏感的标识符也可以写。保存后下一句录音即生效。</p></div>
   </section>
 
   <section class="card">
@@ -503,6 +509,7 @@ const FIELD = [
   ["end_window_size", "doubao.request.end_window_size", "n"],
   ["force_to_speech_time", "doubao.request.force_to_speech_time", "n"],
   ["accelerate_score", "doubao.request.accelerate_score", "n"],
+  ["hotwords", "doubao.hotwords", "l"],
   ["audio_device", "audio_device", "s", true],
   ["sample_rate",  "sample_rate", "n", true],
   ["chunk_ms",     "chunk_ms", "n", true],
@@ -602,7 +609,7 @@ function fillForm(cfg){
     if (ro) { el.textContent = type === "b" ? (v ? "开" : "关") : String(v); continue; }
     if (type === "b") el.checked = !!v;
     else if (type === "n") el.value = v == null ? "" : v;
-    else el.value = v;
+    else if (type === "l") el.value = Array.isArray(v) ? v.join("\\n") : (v == null ? "" : v);
   }
 }
 function collectCfg(){
@@ -613,7 +620,7 @@ function collectCfg(){
     let v;
     if (type === "b") v = el.checked;
     else if (type === "n") v = el.value === "" ? 0 : Number(el.value);
-    else v = el.value;
+    else if (type === "l") v = String(el.value).split(/[\\n,，;；]+/).map(s => s.trim()).filter(Boolean);
     setPath(cfg, path, v);
   }
   cfg.llm = collectLlm();

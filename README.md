@@ -106,6 +106,7 @@ voice-ime/
 |---|---|
 | `doubao.api_key` | 豆包火山引擎 API Key |
 | `doubao.resource_id` | 固定 `volc.seedasr.sauc.duration`（2.0 时长版：按音频时长扣额度、不占并发名额），一般不用改 |
+| `doubao.hotwords` | **热词**（字符串数组，配置台可编辑，一行一个）：谐音误识、专业术语、内部系统名、人名写这里，每次识别作为 `corpus.context.hotwords` 直传给豆包（优先于控制台自学习词表，**不用建表**）。二遍定稿下最多 5000 词。保存后下一句录音即生效，不必重启 |
 | `doubao.request.end_window_size` | **停顿判停 ms**：句末静音这么久即定稿上屏。调小响应快但易碎句，调大更完整但上屏更迟；推荐 500–800，默认 800 |
 | `doubao.request.force_to_speech_time` | **起音保护 ms**：开口后这段时间内不判停，防开头换气被误切成两句；推荐 1000 |
 | `doubao.request.accelerate_score` | **加速率 0–10**：仅配合 `enable_accelerate_text`（首字加速）生效，越大首字越快、精度可能略降；推荐 1–2，默认 0 |

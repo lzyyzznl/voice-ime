@@ -2,6 +2,7 @@
   "doubao": {
     "api_key": "YOUR_DOUBAO_API_KEY",
     "resource_id": "volc.seedasr.sauc.duration",
+    "hotwords": [],
     "request": {
       "enable_punc": true,
       "enable_itn": true,

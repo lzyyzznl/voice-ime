@@ -305,6 +305,7 @@ class VoiceIMEService:
 
     def __init__(self, config_path):
         self.cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        self.config_path = config_path   # 豆包参数（热词等）每次录音前重读，改完不必重启
         self.clients = []          # 所有活动连接的 send 函数（调试/广播用）
         self.clients_lock = threading.Lock()
         self.active_sessions = []  # 所有活动 Session（信号退出时停录音、释放麦克风）
@@ -427,6 +428,12 @@ class VoiceIMEService:
             return (lambda p: self.on_interim(session, p),
                     lambda p: self.on_final(session, p))
         d = self.cfg.get("doubao") or {}
+        try:   # 热词 / API Key / 识别参数热更新：配置台保存后，下一句录音就用新值
+            d = json.loads(Path(self.config_path).read_text(encoding="utf-8")).get("doubao") or d
+        except Exception as e:
+            log.warning("重读 config.json 的 doubao 段失败，沿用启动时配置: %s", e)
+        if d.get("hotwords"):
+            log.info("热词 %d 个: %s", len(d["hotwords"]), ", ".join(map(str, d["hotwords"][:10])))
         # 优化双向流式端点（bigmodel_async）：实测逐句 definite 正常，
         # 帧数最少且有实时 preedit 预览。单次会话不再需要按 15s 切段
         # （该限制来自 espeak 噪声音频的误测，长音频实测无截断）。
@@ -434,6 +441,7 @@ class VoiceIMEService:
             api_key=d.get("api_key", ""),
             resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
             request=d.get("request"),
+            hotwords=d.get("hotwords"),
             sample_rate=self.cfg.get("sample_rate", 16000),
             url=URL_ASYNC,
         ).start(*_cbs())

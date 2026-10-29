@@ -12,6 +12,11 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 # 内网 yum 必须显式 no_proxy，否则走代理报 302
 YUM="sudo -n env no_proxy=nsdlmirrors.zte.com.cn,.zte.com.cn yum install -y"
 
+CHECK_ONLY=""
+case "$1" in
+    --check|-c) CHECK_ONLY=1;;
+esac
+
 echo "voice-ime 一键安装"
 echo "==================="
 echo "代码目录: $APP_DIR"
@@ -20,13 +25,24 @@ echo "systemd : $UNIT_DIR"
 echo ""
 echo "== 1. 依赖检查与安装 =="
 MISSING=""
-command -v gcc >/dev/null 2>&1          || MISSING="$MISSING gcc"
-command -v make >/dev/null 2>&1         || MISSING="$MISSING make"
-command -v pkg-config >/dev/null 2>&1   || MISSING="$MISSING pkg-config"
+# 安装包自带编译好的引擎：没有 gcc/make/fcitx-devel 也能装（引导词就是这么承诺的）
+PREBUILT=""
+SO="$(dirname "$0")/fcitx-engine/fcitx-voiceime.so"
+SRC="$(dirname "$0")/fcitx-engine/voiceime.c"
+if [ -f "$SO" ] && [ ! "$SRC" -nt "$SO" ]; then
+    PREBUILT=1
+fi
+if [ -z "$PREBUILT" ]; then
+    command -v gcc >/dev/null 2>&1          || MISSING="$MISSING gcc"
+    command -v make >/dev/null 2>&1         || MISSING="$MISSING make"
+    command -v pkg-config >/dev/null 2>&1   || MISSING="$MISSING pkg-config"
+fi
 command -v parec >/dev/null 2>&1        || MISSING="$MISSING pulseaudio-utils"
 command -v paplay >/dev/null 2>&1       || MISSING="$MISSING pulseaudio-utils"
-[ -f /usr/include/fcitx/fcitx.h ]       || MISSING="$MISSING fcitx-devel"
-pkg-config --exists glib-2.0 2>/dev/null || MISSING="$MISSING glib2-devel"
+if [ -z "$PREBUILT" ]; then
+    [ -f /usr/include/fcitx/fcitx.h ]       || MISSING="$MISSING fcitx-devel"
+    pkg-config --exists glib-2.0 2>/dev/null || MISSING="$MISSING glib2-devel"
+fi
 # core/web 用 python3.11（本仓库环境）；找不到时降级探测 python3
 PY311=""
 for c in "$HOME/.local/bin/python3" python3; do
@@ -51,6 +67,15 @@ else
 fi
 
 MISSING=$(echo "$MISSING" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')
+if [ -n "$CHECK_ONLY" ]; then
+    # 只体检：不装包、不改系统（说明书第 3 步用的就是这条）
+    if [ -n "$MISSING" ]; then
+        echo "缺失:$MISSING"
+        exit 1
+    fi
+    echo "依赖齐全 ✓"
+    exit 0
+fi
 if [ -n "$MISSING" ]; then
     echo "缺失:$MISSING"
     # 常见项直接 yum（no_proxy 规避 302）
@@ -77,8 +102,13 @@ else
 fi
 
 echo ""
-echo "== 2. 编译并安装引擎 =="
-(cd fcitx-engine && make >/dev/null && sudo -n make install)
+if [ -n "$PREBUILT" ]; then
+    echo "使用包内预编译引擎（无需 gcc/make）"
+    (cd fcitx-engine && sudo -n install -m 755 fcitx-voiceime.so /usr/lib64/fcitx/ \
+        && sudo -n install -m 644 fcitx-voiceime.conf /usr/share/fcitx/addon/)
+else
+    (cd fcitx-engine && make >/dev/null && sudo -n make install)
+fi
 echo "引擎已安装到 /usr/lib64/fcitx/fcitx-voiceime.so ✓"
 mkdir -p "$(dirname "$0")/logs"
 

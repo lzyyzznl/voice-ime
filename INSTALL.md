@@ -16,7 +16,7 @@ ZTE 内网环境的语音输入插件：**按住 Ctrl+Alt 说话 → 松开即�
   - **系统 python3.6**（OSD/draft GTK 窗）：RHEL8 自带，需 `python3-gobject` + `gtk3` + `python36-cairo`
 - 内网可访问豆包 ASR：`wss://openspeech.bytedance.com/...`（外网代理可达）
 - 润色 LLM 凭证（可选）：DeepSeek 官方 sk- key 或内网 MaaS 网关 UUID key
-- sudo 免密或可输密码（仅编译安装引擎时需要）
+- sudo 免密或可输密码（仅安装引擎二进制时需要）
 
 ## 3. 安装步骤
 
@@ -40,7 +40,9 @@ cd ~/workspace/voice-ime
 ./install.sh
 ```
 
-自动完成：yum 装缺失依赖（内置 no_proxy）→ 编译安装 fcitx 引擎 → 图标 → **安装 4 个 systemd 用户单元** → 启动 → 验证。
+自动完成：yum 装缺失依赖（内置 no_proxy）→ 安装 fcitx 引擎（包内自带预编译 `.so`，没有 gcc/make/fcitx-devel 也能装；源码比 `.so` 新时现场编译）→ 图标 → **安装 4 个 systemd 用户单元** → 启动 → 验证。
+
+只体检不改系统：`./install.sh --check`
 
 > 若 `config.json` 已存在则保留（不覆盖凭证）；否则从 `config.example.json` 生成。
 

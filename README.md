@@ -105,8 +105,10 @@ voice-ime/
 | 键 | 说明 |
 |---|---|
 | `doubao.api_key` | 豆包火山引擎 API Key |
-| `doubao.request.end_window_size` | **VAD 结束静音窗口 ms**（500=停顿 500ms 定稿，越小响应越快但易碎句） |
-| `doubao.request.force_to_speech_time` | 起音保护 ms：开口后 1s 内不切句（防开头停顿误切） |
+| `doubao.resource_id` | 固定 `volc.seedasr.sauc.duration`（2.0 时长版：按音频时长扣额度、不占并发名额），一般不用改 |
+| `doubao.request.end_window_size` | **停顿判停 ms**：句末静音这么久即定稿上屏。调小响应快但易碎句，调大更完整但上屏更迟；推荐 500–800，默认 800 |
+| `doubao.request.force_to_speech_time` | **起音保护 ms**：开口后这段时间内不判停，防开头换气被误切成两句；推荐 1000 |
+| `doubao.request.accelerate_score` | **加速率 0–10**：仅配合 `enable_accelerate_text`（首字加速）生效，越大首字越快、精度可能略降；推荐 1–2，默认 0 |
 | `sample_rate` / `chunk_ms` | 16000 / 200ms 音频分片 |
 | `audio_device` | PulseAudio 源名（RDP 环境 `xrdp-source`） |
 | `silence_timeout_sec` / `silence_after_input_sec` | 静音自动停止：从未识别 15s / 识别后 30s |

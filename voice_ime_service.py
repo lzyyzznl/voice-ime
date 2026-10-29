@@ -150,6 +150,9 @@ class Recorder(threading.Thread):
                          or self._buf[0] is not chunk)
                 if not stale:
                     self._buf.popleft()
+                # popleft 后必须 notify：flush_pending 的 wait_for 只在被唤醒或超时后
+                # 才重查谓词，不唤醒就要干等满 timeout（表现为松手后浮窗多停 5 秒）
+                self._buf_cv.notify_all()
             if stale:
                 continue
             try:
@@ -238,6 +241,7 @@ class Recorder(threading.Thread):
         with self._buf_cv:
             self._buf.clear()
             self._buf_gen += 1   # 让已取出、尚未发送的那一块也作废
+            self._buf_cv.notify_all()
 
     def idle(self):
         """回到空闲预热态：停发、清缓存、复位会话参数；parec 继续跑，下次按下即用。"""

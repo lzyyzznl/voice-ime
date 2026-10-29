@@ -106,7 +106,7 @@ voice-ime/
 |---|---|
 | `doubao.api_key` | 豆包火山引擎 API Key |
 | `doubao.resource_id` | 固定 `volc.seedasr.sauc.duration`（2.0 时长版：按音频时长扣额度、不占并发名额），一般不用改 |
-| `doubao.hotwords` | **热词**（字符串数组，配置台以标签形式管理：输入后回车/逗号添加，× 删除，可一次粘贴多个）：谐音误识、专业术语、内部系统名、人名写这里，每次识别作为 `corpus.context.hotwords` 直传给豆包（优先于控制台自学习词表，**不用建表**）。二遍定稿下最多 5000 词。保存后下一句录音即生效，不必重启。**同时作为润色阶段的专有名词表**：ASR 侧的 corpus 热词是「音近替换」，一旦被听成通顺的常见词（CoClaw → 可口可乐 / call log）往往不纠；润色开着时会把音近片段改回这里的写法 |
+| `doubao.hotwords` | **热词**（字符串数组）：一份词表、两条链路 —— 识别时直传豆包 ASR，润色时注入提示词。配置台以标签输入（回车/逗号添加、× 删除、可整段粘贴）。机制与边界见「[热词（专有名词补充机制）](#热词专有名词补充机制)」 |
 | `doubao.request.end_window_size` | **停顿判停 ms**：句末静音这么久即定稿上屏。调小响应快但易碎句，调大更完整但上屏更迟；推荐 500–800，默认 800 |
 | `doubao.request.force_to_speech_time` | **起音保护 ms**：开口后这段时间内不判停，防开头换气被误切成两句；推荐 1000 |
 | `doubao.request.accelerate_score` | **加速率 0–10**：仅配合 `enable_accelerate_text`（首字加速）生效，越大首字越快、精度可能略降；推荐 1–2，默认 0 |
@@ -127,6 +127,75 @@ voice-ime/
 **快捷键写法**：修饰键 `ctrl` / `alt` / `shift` 用 `+` 连接，末尾可加**一个**普通键（`space`、`tab`、`esc`、单个字母数字或 `` ` ``）。例：`ctrl+alt`、`ctrl+shift`、`alt+space`、`ctrl+alt+d`。两个组合不能相同；`hold_keys` 可以以 `ptt_keys` 开头（按下末尾那个键即从对讲机升级为持续模式）。配置台「快捷键」卡片可直接改，保存并重启生效；改后重启 fcitx 才会重新下发到引擎。
 
 **api_key 三种写法**：`sk-` 开头真实密钥 / UUID（内网网关）/ 恰好等于已设环境变量名（从环境读）。
+
+## 热词（专有名词补充机制）
+
+热词是**一份配置、两条链路**：在配置台填一次（或改 `config.json` 的 `doubao.hotwords` 数组），
+既进 ASR 请求，也进润色提示词。两侧作用方式不同，互补而非重复 —— 前者在识别阶段纠音，
+后者在上屏阶段纠写法。
+
+```mermaid
+flowchart LR
+    H["热词 doubao.hotwords<br/>CoClaw · influxdb · 康飞格"] --> A["ASR 请求<br/>request.corpus.context.hotwords"]
+    H --> P["润色 system prompt<br/>【专有名词表】段"]
+    A --> R1["豆包识别<br/>只在「听着像、且原文说不通」时替换"]
+    P --> R2["LLM 润色<br/>读音相近但写法不同 → 改回表中写法"]
+    R1 --> F["上屏文本"]
+    R2 --> F
+```
+
+### 链路一：ASR 热词直传（识别阶段）
+
+每次录音建连时随首包发出 `request.corpus.context = {"hotwords": [{"word": "…"}]}`。
+
+| 项目 | 说明 |
+|---|---|
+| 与词表的关系 | 官方口径：直传热词**优先于**自学习平台词表，所以**不用建表** |
+| 上限 | 二遍定稿（`enable_nonstream`）下最多 5000 词；实际几十个够用 |
+| 生效条件 | 只在**音近**时替换 |
+
+实测（espeak 合成，同一段音频）：
+
+| 音频 | 热词 | 识别结果 |
+|---|---|---|
+| please check the **coclaw** repository now | 无 | `Please check my call log history now.` |
+| 同上 | `Coclaw` | 同上 —— **没纠** |
+| influxdb and jieba | 无 | `Inflex CBN GMA.` |
+| 同上 | `influxdb` | `InfluxDB and GMA.` ✅ |
+
+差别不在中英文，而在输出**本身是否通顺**：`Inflex CBN GMA` 是无意义串，模型放心换成热词；
+`call log` 是常见词，判为无需纠正。所以「只支持中文」是误读，真实规则是「只纠说不通的」。
+
+### 链路二：润色阶段专有名词表（上屏阶段）
+
+`llm_polish.polish()` 默认（`glossary="auto"`）读取同一份热词，向 system prompt 追加一段：
+
+```text
+【专有名词表】下面这些是用户工作里的专有名词。识别结果里若出现读音相近、但写法不同的片段
+（例如把 CoClaw 听成「可口可乐」或「call log」），必须改回下面给出的写法；没有音近片段就不要改动任何字。
+CoClaw
+```
+
+| 项目 | 说明 |
+|---|---|
+| 生效前提 | `llm.auto_polish: true`；润色失败/超时会回落原文，不丢字 |
+| 关闭方式 | 清空 `doubao.hotwords`；代码里也可 `polish(..., glossary=None)` |
+| 覆盖范围 | core 自动润色、草稿窗「优化」、`eval_optimizer.py` 都走同一函数 |
+| 与手写提示词的关系 | 这段是**追加**的，配置台弹窗里只编辑你自己的规则，不用也不该把它抄进去 |
+
+实测（DeepSeek，热词 `Coclaw`）：`可口可乐这个项目怎么跑` → `Coclaw 这个项目怎么跑？`。
+
+### 这张表怎么维护
+
+| 问题 | 做法 |
+|---|---|
+| 填什么 | 自己的名字与常打交道的同事名、内部系统名（`context-hub`、`icker`、`edw`、`zmail`）、英文术语（`influxdb`、`jieba`、`RDC`）、总被听错的谐音词。几十个足够，不必穷举 |
+| 怎么写 | 按**你希望上屏的样子**写，大小写敏感（要 `CoClaw` 就填 `CoClaw`）；配置台回车/逗号添加，或直接编辑数组 |
+| 何时生效 | 保存后**下一句录音**即生效（每次建连重读 `config.json`，润色侧每次调用现读），都不用重启 |
+| 代价 | ASR 侧随首包发一次、润色侧只是几十字提示词，无额外请求，无可感延迟 |
+
+两侧都没命中时（热词没填对、或误识差太远），`logs/voiceime-service.log` 里逐句能看到两侧各自的结果：
+`热词 N 个: …`（确认词已带上）→ `识别结果: '…'`（ASR 侧）→ `润色 0.79s: '原文' -> '结果'`（润色侧）。
 
 ## 构建与安装（详见 INSTALL.md）
 

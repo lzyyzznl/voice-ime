@@ -418,7 +418,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <div class="chips" id="hotwordsBox">
       <input id="hotwordsInput" spellcheck="false" autocomplete="off" placeholder="输入一个词后回车添加，可一次粘贴多个">
     </div>
-    <p class="fa" style="margin-top:6px">随每次识别一起发给豆包；开着「自动润色」时，音近听错的词也会顺带纠正回来。保存后下一句录音即生效。</p>
+    <p class="fa" style="margin-top:6px">一份词表走两条链路：识别时随请求发给豆包（音近纠错）；开着「自动润色」时再作为专有名词表，把听成常见词的（如 Coclaw → 可口可乐）改回来。保存后下一句录音即生效。</p>
   </section>
 
   <section class="card">
@@ -471,6 +471,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
         <span class="pt">润色提示词<span class="n" id="promptMeta"></span></span>
         <span class="pv" id="promptPeek"></span>
       </button></div>
+    <p class="fa" style="margin-top:6px">提示词末尾会自动追加「专有名词表」（内容取自上面的热词，没填热词就不追加）；这里只写你自己的规则。</p>
   </section>
 
   <section class="card">

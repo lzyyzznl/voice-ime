@@ -265,6 +265,34 @@ select option{background:var(--paper)}
 .eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:1px solid var(--ink);background:var(--paper2);
   color:var(--ink);cursor:pointer;padding:3px 8px;font:11px/1 var(--mono)}
 .eye:hover{background:var(--ink);color:var(--paper)}
+.chips{display:flex;flex-wrap:wrap;gap:7px;align-items:center;background:var(--paper);border:2px solid var(--ink);
+  padding:8px 9px;min-height:46px;cursor:text}
+.chips:focus-within{border-color:var(--red);box-shadow:3px 3px 0 var(--red)}
+.chips input,.chips input:hover,.chips input:focus-visible{width:auto;flex:1;min-width:150px;border:none;
+  box-shadow:none;background:none;padding:4px 2px;font:12.5px/1.6 var(--mono)}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--ink);color:var(--paper);
+  font:700 12px/1 var(--mono);padding:6px 7px 6px 9px}
+.chip-x{background:none;border:none;color:var(--paper);cursor:pointer;font:700 14px/1 var(--mono);
+  padding:0 1px;opacity:.65}
+.chip-x:hover{opacity:1;color:var(--amber)}
+.prompt-btn{display:flex;flex-direction:column;gap:6px;width:100%;text-align:left;cursor:pointer;
+  background:var(--paper);border:2px solid var(--ink);padding:10px 12px;font:inherit;color:var(--ink)}
+.prompt-btn:hover{border-color:var(--red);box-shadow:3px 3px 0 var(--red)}
+.prompt-btn .pt{display:flex;align-items:center;gap:8px;font:700 12px/1 var(--mono)}
+.prompt-btn .pt .n{margin-left:auto;font-weight:400;color:var(--muted)}
+.prompt-btn .pv{font:11.5px/1.65 var(--mono);color:var(--muted);white-space:pre-wrap;word-break:break-word;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.modal{position:fixed;inset:0;z-index:40;background:rgba(23,20,18,.55);display:flex;
+  align-items:center;justify-content:center;padding:24px}
+.modal[hidden]{display:none!important}
+.modal-box{width:min(920px,100%);max-height:88vh;display:flex;flex-direction:column;gap:12px;
+  background:var(--paper);border:2px solid var(--ink);box-shadow:8px 8px 0 var(--ink);padding:16px 18px}
+.modal-h{display:flex;align-items:center;gap:12px}
+.modal-h h3{margin:0;font:800 13px/1.2 var(--mono);letter-spacing:.04em}
+.modal-h .sp{margin-left:auto;font:11px/1 var(--mono);color:var(--muted)}
+.modal-box textarea{flex:1;min-height:min(58vh,520px)}
+.modal-f{display:flex;align-items:center;gap:10px}
+.modal-f .fa{margin:0 auto 0 0;font:11px/1 var(--mono);color:var(--muted)}
 .subgrid{display:grid;grid-template-columns:1fr 1fr;gap:15px 20px}
 @media(max-width:760px){.subgrid,.llm-grid{grid-template-columns:1fr}}
 .sw{display:flex;align-items:center;gap:11px;background:var(--paper2);border:2px solid var(--ink);
@@ -385,10 +413,11 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <div class="f in-mono"><label for="accelerate_score">加速率 score</label><input type="number" id="accelerate_score" min="0" max="10">
         <p class="fa">「首字加速」的加速强度，0–10。<b>未勾选首字加速时不生效</b>（输入框置灰）。数值越大首字回来越快，识别精度可能略降。推荐 1–2，默认 0。</p></div>
     </div>
-    <p class="card-desc" style="margin:16px 0 10px">热词<span style="color:var(--faint)"> · 谐音误识 / 专业术语 / 内部系统名，随每次识别一起发给豆包</span></p>
-    <div class="f in-mono"><label for="hotwords">热词（一行一个，也可逗号分隔）</label>
-      <textarea id="hotwords" rows="4" spellcheck="false" placeholder="康飞格&#10;influxdb&#10;jieba&#10;ASR 热词"></textarea>
-      <p class="fa">写进来的词会作为豆包 <code>corpus.context.hotwords</code> 直传（优先于控制台词表，不用建表），同时作为润色阶段的专有名词表：ASR 热词只在「音近」时替换，被听成通顺的常见词（如 CoClaw → 可口可乐）不一定纠，开着「自动润色」时会把这类音近片段改回这里的写法。二遍定稿下最多 5000 个词，一般写几十个常用的就够了；纯英文词、大小写敏感的标识符也可以写。保存后下一句录音即生效。</p></div>
+    <p class="card-desc" style="margin:16px 0 8px">热词<span style="color:var(--faint)"> · 谐音听错的词、专业术语、内部系统名、人名</span></p>
+    <div class="chips" id="hotwordsBox">
+      <input id="hotwordsInput" spellcheck="false" autocomplete="off" placeholder="输入一个词后回车添加，可一次粘贴多个">
+    </div>
+    <p class="fa" style="margin-top:6px">随每次识别一起发给豆包；开着「自动润色」时，音近听错的词也会顺带纠正回来。保存后下一句录音即生效。</p>
   </section>
 
   <section class="card">
@@ -436,8 +465,11 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     </div>
     <div class="f" style="margin-top:10px"><label for="llm_name">模型名称</label><input type="text" id="llm_name" spellcheck="false" placeholder="下拉里显示的名字"></div>
     <label class="sw" style="margin-top:14px"><input type="checkbox" id="llm_auto_polish"><span class="tr"></span><span class="n">自动润色</span><span class="d">每句上屏前先润色（对当前选中模型生效）</span></label>
-    <div class="f" style="margin-top:14px"><label for="llm_system_prompt">System Prompt</label>
-      <textarea id="llm_system_prompt" spellcheck="false"></textarea></div>
+    <div class="f" style="margin-top:14px"><label>System Prompt</label>
+      <button type="button" class="prompt-btn" id="btnPromptEdit">
+        <span class="pt">润色提示词<span class="n" id="promptMeta"></span></span>
+        <span class="pv" id="promptPeek"></span>
+      </button></div>
   </section>
 
   <section class="card">
@@ -488,6 +520,18 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
 </div></div>
 
 <div id="toasts"></div>
+<div class="modal" id="promptModal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-label="编辑润色提示词">
+    <div class="modal-h"><h3>润色提示词</h3><span class="sp" id="promptFor"></span>
+      <button type="button" class="btn ghost" id="btnPromptClose">关闭</button></div>
+    <textarea id="promptEditor" spellcheck="false"></textarea>
+    <div class="modal-f">
+      <span class="fa" id="promptCount"></span>
+      <button type="button" class="btn" id="btnPromptReset">还原</button>
+      <button type="button" class="btn primary" id="btnPromptOk">确定</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -509,7 +553,7 @@ const FIELD = [
   ["end_window_size", "doubao.request.end_window_size", "n"],
   ["force_to_speech_time", "doubao.request.force_to_speech_time", "n"],
   ["accelerate_score", "doubao.request.accelerate_score", "n"],
-  ["hotwords", "doubao.hotwords", "l"],
+  ["hotwords", "doubao.hotwords", "chips"],
   ["audio_device", "audio_device", "s", true],
   ["sample_rate",  "sample_rate", "n", true],
   ["chunk_ms",     "chunk_ms", "n", true],
@@ -554,7 +598,7 @@ function fillModelFields(){
   $("llm_model").value = m.model || "";
   $("llm_api_key").value = m.api_key || "";
   $("llm_name").value = m.name || "";
-  $("llm_system_prompt").value = m.system_prompt || "";
+  promptPreview();
 }
 function saveModelFields(){
   const m = curModel(); if (!m) return;
@@ -562,7 +606,7 @@ function saveModelFields(){
   m.model = $("llm_model").value;
   m.api_key = $("llm_api_key").value;
   m.name = $("llm_name").value || m.name || m.id;
-  m.system_prompt = $("llm_system_prompt").value;
+  
   const sel = $("llm_models");
   const o = sel.selectedOptions[0]; if (o) o.textContent = m.name;
 }
@@ -605,6 +649,7 @@ function fillForm(cfg){
     let v = getPath(cfg, path);
     if (v === undefined && path in FALLBACK) v = FALLBACK[path];
     if (v === undefined) continue;
+    if (type === "chips") { hotwordList = Array.isArray(v) ? v.map(String) : []; renderHotwords(); continue; }
     const el = $(id); if (!el) continue;
     if (ro) { el.textContent = type === "b" ? (v ? "开" : "关") : String(v); continue; }
     if (type === "b") el.checked = !!v;
@@ -616,6 +661,7 @@ function collectCfg(){
   const cfg = {};
   for (const [id, path, type, ro] of FIELD){
     if (ro) continue;
+    if (type === "chips") { setPath(cfg, path, hotwordList.slice()); continue; }
     const el = $(id); if (!el) continue;
     let v;
     if (type === "b") v = el.checked;
@@ -645,6 +691,76 @@ function syncDisabled(){
   $("accelerate_score").disabled = !$("enable_accelerate_text").checked;
 }
 $("enable_accelerate_text").addEventListener("change", syncDisabled);
+
+/* ── 热词（chips 输入）─────────────────── */
+let hotwordList = [];
+function renderHotwords(){
+  const box = $("hotwordsBox"), inp = $("hotwordsInput");
+  if (!box) return;
+  box.querySelectorAll(".chip").forEach(c => c.remove());
+  hotwordList.forEach(w => {
+    const c = document.createElement("span"); c.className = "chip";
+    c.appendChild(document.createTextNode(w));
+    const x = document.createElement("button"); x.type = "button"; x.className = "chip-x";
+    x.textContent = "×"; x.title = "删除"; x.setAttribute("aria-label", "删除 " + w);
+    x.addEventListener("click", () => { hotwordList = hotwordList.filter(v => v !== w); renderHotwords(); });
+    c.appendChild(x); box.insertBefore(c, inp);
+  });
+}
+function addHotwords(raw){
+  const ws = String(raw).split(/[\\n,，;；、]+/).map(s => s.trim()).filter(Boolean);
+  if (!ws.length) return;
+  ws.forEach(w => { if (!hotwordList.includes(w)) hotwordList.push(w); });
+  renderHotwords();
+}
+const hotInp = $("hotwordsInput");
+hotInp.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); addHotwords(e.target.value); e.target.value = ""; }
+  else if (e.key === "Backspace" && !e.target.value && hotwordList.length) { hotwordList.pop(); renderHotwords(); }
+});
+/* 失焦即收录，点了「保存」也不会漏掉刚敲的词 */
+hotInp.addEventListener("blur", e => { addHotwords(e.target.value); e.target.value = ""; });
+hotInp.addEventListener("paste", e => {
+  const t = (e.clipboardData || window.clipboardData).getData("text") || "";
+  if (/[\\n,，;；、]/.test(t)) { e.preventDefault(); addHotwords(t); }
+});
+$("hotwordsBox").addEventListener("click", e => { if (e.target === e.currentTarget) hotInp.focus(); });
+
+/* ── 润色提示词弹窗 ────────────────────── */
+let promptOrig = "";
+function promptPreview(){
+  const s = (curModel() || {}).system_prompt || "";
+  $("promptPeek").textContent = s || "（空 · 点这里编辑）";
+  $("promptMeta").textContent = s ? s.length + " 字" : "未设置";
+}
+function promptCount(){
+  const n = $("promptEditor").value.length;
+  $("promptCount").textContent = n ? n + " 字" : "空";
+}
+$("btnPromptEdit").addEventListener("click", () => {
+  saveModelFields();
+  const m = curModel() || {};
+  promptOrig = m.system_prompt || "";
+  $("promptFor").textContent = m.name || m.id || "";
+  $("promptEditor").value = promptOrig;
+  promptCount();
+  $("promptModal").hidden = false;
+  $("promptEditor").focus();
+});
+function closePrompt(){ $("promptModal").hidden = true; }
+$("btnPromptClose").addEventListener("click", closePrompt);
+$("btnPromptReset").addEventListener("click", () => {
+  $("promptEditor").value = promptOrig; promptCount(); $("promptEditor").focus();
+});
+$("btnPromptOk").addEventListener("click", () => {
+  const m = curModel(); if (m) m.system_prompt = $("promptEditor").value;
+  saveModelFields(); promptPreview(); closePrompt();
+});
+$("promptEditor").addEventListener("input", promptCount);
+$("promptModal").addEventListener("click", e => { if (e.target === e.currentTarget) closePrompt(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && !$("promptModal").hidden) { e.preventDefault(); closePrompt(); }
+});
 
 /* ── toast ────────────────────────────── */
 function toast(title, msg, kind, ms){

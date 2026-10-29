@@ -106,7 +106,7 @@ voice-ime/
 |---|---|
 | `doubao.api_key` | 豆包火山引擎 API Key |
 | `doubao.resource_id` | 固定 `volc.seedasr.sauc.duration`（2.0 时长版：按音频时长扣额度、不占并发名额），一般不用改 |
-| `doubao.hotwords` | **热词**（字符串数组，配置台可编辑，一行一个）：谐音误识、专业术语、内部系统名、人名写这里，每次识别作为 `corpus.context.hotwords` 直传给豆包（优先于控制台自学习词表，**不用建表**）。二遍定稿下最多 5000 词。保存后下一句录音即生效，不必重启。**同时作为润色阶段的专有名词表**：ASR 侧的 corpus 热词是「音近替换」，一旦被听成通顺的常见词（CoClaw → 可口可乐 / call log）往往不纠；润色开着时会把音近片段改回这里的写法 |
+| `doubao.hotwords` | **热词**（字符串数组，配置台以标签形式管理：输入后回车/逗号添加，× 删除，可一次粘贴多个）：谐音误识、专业术语、内部系统名、人名写这里，每次识别作为 `corpus.context.hotwords` 直传给豆包（优先于控制台自学习词表，**不用建表**）。二遍定稿下最多 5000 词。保存后下一句录音即生效，不必重启。**同时作为润色阶段的专有名词表**：ASR 侧的 corpus 热词是「音近替换」，一旦被听成通顺的常见词（CoClaw → 可口可乐 / call log）往往不纠；润色开着时会把音近片段改回这里的写法 |
 | `doubao.request.end_window_size` | **停顿判停 ms**：句末静音这么久即定稿上屏。调小响应快但易碎句，调大更完整但上屏更迟；推荐 500–800，默认 800 |
 | `doubao.request.force_to_speech_time` | **起音保护 ms**：开口后这段时间内不判停，防开头换气被误切成两句；推荐 1000 |
 | `doubao.request.accelerate_score` | **加速率 0–10**：仅配合 `enable_accelerate_text`（首字加速）生效，越大首字越快、精度可能略降；推荐 1–2，默认 0 |
@@ -122,7 +122,7 @@ voice-ime/
 | `llm.active` | 当前生效模型 id（对应 models[].id） |
 | `llm.models[]` | 多模型列表：`{id, name, endpoint, api_key, model, system_prompt}`，配置台可视化管理 |
 | `llm.auto_polish` | 每句上屏前 LLM 润色开关 |
-| `llm.models[].system_prompt` | 润色提示词：明示「上文/待润色」边界 + 分条规则（详见 example） |
+| `llm.models[].system_prompt` | 润色提示词：明示「上文/待润色」边界 + 分条规则（详见 example）。配置台里点提示词预览块打开弹窗编辑（字数统计、还原、Esc 关闭） |
 
 **快捷键写法**：修饰键 `ctrl` / `alt` / `shift` 用 `+` 连接，末尾可加**一个**普通键（`space`、`tab`、`esc`、单个字母数字或 `` ` ``）。例：`ctrl+alt`、`ctrl+shift`、`alt+space`、`ctrl+alt+d`。两个组合不能相同；`hold_keys` 可以以 `ptt_keys` 开头（按下末尾那个键即从对讲机升级为持续模式）。配置台「快捷键」卡片可直接改，保存并重启生效；改后重启 fcitx 才会重新下发到引擎。
 

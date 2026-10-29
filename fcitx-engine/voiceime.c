@@ -467,7 +467,9 @@ static void poll_queue_cb(void* data)
        原先只有 send_cmd 写失败时才重连，而 core 重启后没人发命令 → 引擎
        永久失联：按键照常打 filter 日志，但 start 永远发不出去（表现为
        "按什么键都呼不出来"，只能 fcitx -r）。限速 1 秒一次。 */
-    if (!im->recv_running && im->sock >= 0) {
+    /* sock<0 也必须重试：connect 失败后 sock 已是 -1，若要求 sock>=0
+       则 core 重启期间的一次失败会永久断连，只能重启 fcitx 恢复。 */
+    if (!im->recv_running) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         long long now_ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;

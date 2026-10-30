@@ -150,7 +150,7 @@ tail -f logs/voiceime-osd.log       # 浮窗
 |---|---|
 | 按 Ctrl+Alt 无反应 | ① fcitx 未激活：`fcitx-remote` 返回 2 才生效，`fcitx-remote -o` 激活；② 插件未加载：看 `logs/voiceime-engine.log` 是否有「addon 已加载」；③ core 未运行 |
 | 日志无「addon 已加载」 | 重启 fcitx（3.5）；确认 `/usr/lib64/fcitx/fcitx-voiceime.so` 与 `/usr/share/fcitx/addon/fcitx-voiceime.conf`（`Category=Module`）；`logs/` 目录须存在（install.sh 会建） |
-| 识别报错/无结果 | 豆包 key 空/错；网络不通；看 core 日志 `ASR` 行 |
+| 识别报错/无结果 | 看浮窗：红边卡片「语音密钥无效」= 豆包 key 被拒（401/403），去配置台点「校验 Key」，绿色通过才能保存；无红字则查网络（`ASR` 日志行） |
 | 润色失败频繁 | 看日志「润色失败，提交原文」；key 失效/模型到期/超时 8s；配置台切换模型 |
 | 润色不生效 | `llm.auto_polish` 未开；active 模型 key 无效 |
 | 说话 60s 处断 | 看 service 日志「会话切换」 |

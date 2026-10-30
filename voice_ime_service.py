@@ -383,6 +383,7 @@ class VoiceIMEService:
         self._xfocus = XFocus()
         self._mode_b = False        # 录音模式：A 持续输入（默认）/ B 即停（Shift 切换）
         self._warm = None           # 常驻预热录音流（见 _take_recorder）
+        self._bad_key = None         # 上次握手 401/403 的 key：再次按下时立刻提示，不必等一轮握手
 
     def _osd_send(self, obj):
         """向桌面浮窗发状态（录音中 RMS / stop 隐藏），失败忽略"""
@@ -390,6 +391,14 @@ class VoiceIMEService:
             self._osd_sock.sendto(json.dumps(obj).encode(), self.OSD_ADDR)
         except Exception:
             pass
+
+    def _current_api_key(self):
+        """当前生效的 API Key（每次现读 config，与 _make_asr 同源）"""
+        try:
+            d = json.loads(Path(self.config_path).read_text(encoding="utf-8")).get("doubao") or {}
+        except Exception:
+            d = self.cfg.get("doubao") or {}
+        return (d.get("api_key") or "").strip()
 
     def _draft_send(self, obj):
         """向草稿窗口发识别文本/显示命令，失败忽略（草稿窗口未启动等）"""
@@ -734,6 +743,11 @@ class VoiceIMEService:
             session.rec = rec
             # 浮窗：未就绪先画灰线，首块音频到达再转彩色声波
             self._osd_send({"type": "show", "ready": rec.ready_evt.is_set()})
+            # 这个 key 上次被服务端 401 拒绝过：按下即提示，别让用户说完一整句才发现无效
+            _key = self._current_api_key()
+            if _key and _key == self._bad_key:
+                self._osd_send({"type": "error",
+                                "text": "语音密钥无效 · 请在配置台「校验 Key」后保存"})
         if not silent:
             self._beep_when_ready(rec)   # 提示音就是"可以开口了"的信号，不等 WebSocket 握手
         with self.clients_lock:
@@ -763,14 +777,23 @@ class VoiceIMEService:
             asr = self._make_asr(session)
         except Exception as e:
             log.error("ASR 启动失败: %s", e)
+            msg = str(e)
+            bad_key = ("401" in msg or "403" in msg or "unauthor" in msg.lower())
+            if bad_key:
+                self._bad_key = self._current_api_key()
+                hint = "语音密钥无效 · 请在配置台「校验 Key」后保存"
+                log.error("浮窗提示: %s", hint)
+                self._osd_send({"type": "error", "text": hint})
             if session.drafting:
                 self._draft_send({"type": "text", "mode": "interim", "text": f"ASR 失败: {e}"})
-            else:
+            elif not bad_key:
+                # 密钥无效已由浮窗提示：不再往输入框塞错误文本，免得被当成正文提交
                 session.send({"type": "preedit", "text": f"ASR 失败: {e}"})
             # 录音已在跑：按停止收尾并复位引擎，避免浮窗卡在录音态
             threading.Thread(target=self.stop_session, args=(session, gen, False),
                              daemon=True).start()
             return
+        self._bad_key = None      # 握手成功：清掉失败标记
         with session.lock:
             if session.generation != gen or session.rec is None:
                 log.info("握手期会话已停止（松开过早），丢弃 ASR")

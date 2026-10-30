@@ -18,7 +18,7 @@ import time
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib   # noqa: E402
+from gi.repository import Gtk, GLib, Pango, PangoCairo   # noqa: E402
 import cairo                          # pycairo（gi 的 cairo 封装无 OPERATOR_SOURCE）
 
 UDP_ADDR = ("127.0.0.1", 19527)
@@ -34,6 +34,8 @@ BAR_GAP = 12
 BAR_MAX_H = 28
 BAR_MIN_H = 2
 TIMEOUT_MS = 800                      # 无数据自动隐藏
+ERR_W, ERR_H = 420, 46                # 硬错误提示卡片尺寸（比声波条宽，容得下一行字）
+ERR_MS = 4500                         # 提示停留时长
 SMOOTH = 0.28                         # RMS 平滑系数（避免声波剧烈抖动）
 
 
@@ -90,6 +92,9 @@ class OSD:
         self.ready = True          # 麦克风是否已真正在采（show 的 ready 字段控制）
         self.polish_state = None   # LLM 润色状态：None=空闲 / 'on'=润色中 / 'fail'=润色失败（短暂红后恢复）
         self.polish_until = 0.0    # fail 状态的自动恢复时刻（monotonic）
+        self.dw, self.dh = self.w, self.h   # load_cfg 的默认尺寸（提示卡片收起后复原）
+        self.error_text = ""       # 非空 → 卡片改成红字提示（如密钥无效），不画声波
+        self.error_until = 0.0     # 提示自动收起时刻（monotonic）
         self.peak = 1.0            # 自适应峰值：不同麦克风电平下都能看出起伏
         GLib.timeout_add(40, self.tick)
 
@@ -125,8 +130,17 @@ class OSD:
                 self.last_data = time.monotonic()
                 if self.visible:
                     self.da.queue_draw()
+            elif msg.get("type") == "error":
+                # 密钥无效之类的硬错误：整条卡片换成红字提示并停留 ERR_MS。
+                # 期间的 stop 被忽略，否则停止录音会立刻把提示擦掉
+                self.error_text = str(msg.get("text") or "语音密钥无效")
+                self.error_until = time.monotonic() + ERR_MS / 1000
+                self.have_rms = False
+                self.resize(ERR_W, ERR_H)
+                self.show()
             elif msg.get("type") == "stop":
-                self.hide()
+                if not self.error_text:
+                    self.hide()
             elif msg.get("type") == "mode":
                 self.mode_b = bool(msg.get("b", self.mode_b))
                 self.last_data = time.monotonic()
@@ -155,6 +169,8 @@ class OSD:
         if (self.visible and self.have_rms
                 and time.monotonic() - self.last_data > TIMEOUT_MS / 1000):
             self.hide()                               # 超时无数据 → 隐藏
+        if self.error_text and time.monotonic() > self.error_until:
+            self.hide()                               # 提示到点自动收起
         if self.polish_state == "fail" and time.monotonic() > self.polish_until:
             self.polish_state = None                  # 失败红 1.5s 后自动恢复默认色
         if self.visible:
@@ -178,9 +194,40 @@ class OSD:
         self.target_rms = 0
         self.display_rms = 0
         self.polish_state = None
+        self.error_text = ""
+        if (self.w, self.h) != (self.dw, self.dh):
+            self.resize(self.dw, self.dh)             # 提示卡片收起 → 恢复声波条尺寸
         self.win.hide()
 
+    def resize(self, w, h):
+        """切换卡片尺寸：Gtk 窗口与 DrawingArea 都要重设，再按新宽度重新居中"""
+        if (self.w, self.h) == (w, h):
+            return
+        self.w, self.h = w, h
+        self.da.set_size_request(w, h)
+        self.win.resize(w, h)
+        self.reposition()
+
     def on_draw(self, widget, cr):
+        aw, ah = widget.get_allocated_width(), widget.get_allocated_height()
+        if aw < 2 or ah < 2:
+            aw, ah = self.w, self.h
+        # 清透明背景（RGBA 视觉下 alpha=0）
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        if self.error_text:
+            # 硬错误提示（密钥无效等）：红边卡片 + 居中文字，取代声波条
+            self._draw_card(cr, aw, ah, (1.0, 0.35, 0.35, 1.0))
+            layout = PangoCairo.create_layout(cr)
+            layout.set_text(self.error_text, -1)
+            layout.set_font_description(Pango.FontDescription("Sans 11"))
+            tw, th = layout.get_pixel_size()
+            cr.move_to(max(8, (aw - tw) / 2), max(3, (ah - th) / 2))
+            cr.set_source_rgba(1.0, 0.62, 0.62, 1.0)
+            PangoCairo.show_layout(cr, layout)
+            return
         # 声波条只表示录音模式：青蓝=持续输入 A，橙=即停 B（松手即上屏）
         # 润色状态改用卡片描边提示，不改变声波主色：黄=润色中，红=失败（1.5 秒后恢复）
         if not self.ready:
@@ -193,33 +240,7 @@ class OSD:
             edge_color = (1.0, 0.85, 0.25, 0.95)
         else:
             edge_color = bar_color
-        aw, ah = widget.get_allocated_width(), widget.get_allocated_height()
-        if aw < 2 or ah < 2:
-            aw, ah = self.w, self.h
-        # 清透明背景（RGBA 视觉下 alpha=0）
-        cr.set_operator(cairo.OPERATOR_SOURCE)
-        cr.set_source_rgba(0, 0, 0, 0)
-        cr.paint()
-        cr.set_operator(cairo.OPERATOR_OVER)
-        # 高亮阴影（三层，保证任意背景下可见）：
-        # 1. 黑色投影（向右下偏移）→ 浅色背景下的轮廓（深色背景不可见）
-        rounded_rect(cr, 4.5, 5, aw - 9, ah - 9, 16)
-        cr.set_source_rgba(0, 0, 0, 0.28)
-        cr.fill()
-        # 2. 外发光（外扩半透明描边）→ 深色背景下的光晕，跟随当前状态色
-        rounded_rect(cr, 0.5, 0.5, aw - 1, ah - 1, 19)
-        cr.set_source_rgba(edge_color[0], edge_color[1], edge_color[2], 0.30)
-        cr.set_line_width(3.0)
-        cr.stroke()
-        # 3. 圆角半透明卡片
-        rounded_rect(cr, 3, 3, aw - 6, ah - 6, 16)
-        cr.set_source_rgba(*BG)
-        cr.fill()
-        # 圆角卡片描边：润色中变黄、失败变红，其余跟随模式色
-        rounded_rect(cr, 3.5, 3.5, aw - 7, ah - 7, 15)
-        cr.set_source_rgba(*edge_color)
-        cr.set_line_width(1.2)
-        cr.stroke()
+        self._draw_card(cr, aw, ah, edge_color)
         # 声波条：高度随 RMS，轻微相位差 → 波纹效果
         rms = self.display_rms if self.ready else 0
         # 相对当前峰值归一化：有声时接近满幅，静音时回落成一条细线——两者一眼可辨，
@@ -243,6 +264,27 @@ class OSD:
         for bx, h in bars:
             rounded_rect(cr, bx, cy - h / 2, BAR_W, h, BAR_W / 2)
             cr.fill()
+
+    def _draw_card(self, cr, aw, ah, edge_color):
+        """圆角卡片三层底：黑色投影 → 外发光 → 半透明卡片 + 状态色描边"""
+        # 1. 黑色投影（向右下偏移）→ 浅色背景下的轮廓（深色背景不可见）
+        rounded_rect(cr, 4.5, 5, aw - 9, ah - 9, 16)
+        cr.set_source_rgba(0, 0, 0, 0.28)
+        cr.fill()
+        # 2. 外发光（外扩半透明描边）→ 深色背景下的光晕，跟随当前状态色
+        rounded_rect(cr, 0.5, 0.5, aw - 1, ah - 1, 19)
+        cr.set_source_rgba(edge_color[0], edge_color[1], edge_color[2], 0.30)
+        cr.set_line_width(3.0)
+        cr.stroke()
+        # 3. 圆角半透明卡片
+        rounded_rect(cr, 3, 3, aw - 6, ah - 6, 16)
+        cr.set_source_rgba(*BG)
+        cr.fill()
+        # 描边：润色中变黄、失败变红，其余跟随模式色
+        rounded_rect(cr, 3.5, 3.5, aw - 7, ah - 7, 15)
+        cr.set_source_rgba(*edge_color)
+        cr.set_line_width(1.2)
+        cr.stroke()
 
 
 def main():

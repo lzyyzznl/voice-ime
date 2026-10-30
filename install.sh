@@ -9,8 +9,12 @@ cd "$(dirname "$0")"
 APP_DIR="$(pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-# 内网 yum 必须显式 no_proxy，否则走代理报 302
-YUM="sudo -n env no_proxy=nsdlmirrors.zte.com.cn,.zte.com.cn yum install -y"
+# yum 镜像在内网、本机又走代理时，需显式 no_proxy 直连，否则报 302：
+#   VOICEIME_YUM_NO_PROXY="mirror.example.com,.example.com" ./install.sh
+YUM="sudo -n yum install -y"
+if [ -n "${VOICEIME_YUM_NO_PROXY:-}" ]; then
+    YUM="sudo -n env no_proxy=$VOICEIME_YUM_NO_PROXY yum install -y"
+fi
 
 CHECK_ONLY=""
 case "$1" in
@@ -79,7 +83,7 @@ if [ -n "$CHECK_ONLY" ]; then
 fi
 if [ -n "$MISSING" ]; then
     echo "缺失:$MISSING"
-    # 常见项直接 yum（no_proxy 规避 302）
+    # 常见项直接 yum（镜像走代理时报 302，见上方 VOICEIME_YUM_NO_PROXY）
     PKGS=""
     for x in $MISSING; do
         case "$x" in

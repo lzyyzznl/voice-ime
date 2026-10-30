@@ -1,8 +1,8 @@
-# voice-ime — ZTE 内网语音输入法（fcitx 引擎版）
+# voice-ime — Linux 桌面语音输入法（fcitx 引擎版）
 
 > **安装与使用：见 [INSTALL.md](INSTALL.md)**（面向 AI 代理的分步指南）
 
-在 ZTE 内网环境下，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
+在 Linux 桌面（X11 + fcitx 4）上，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
 **默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**——不碰剪贴板，一句话说完松手即可。
 
 > 快捷键可改：**按住说话** 与 **按住持续对话** 两组组合在配置台「快捷键」卡片里设置（`ptt_keys` / `hold_keys`）。
@@ -18,7 +18,7 @@ flowchart LR
     S -->|"parec 16kHz PCM<br/>200ms 音频帧 · 独立发送线程（不阻塞录音）"| R[Recorder]
     R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 async 双向流式]
     A -->|"interim / definite final"| S
-    S -->|"auto_polish 开启时"| L[润色: llm_polish.py<br/>DeepSeek 官方 / ZTE MaaS 网关<br/>JSON Output · 多模型可切换]
+    S -->|"auto_polish 开启时"| L[润色: llm_polish.py<br/>OpenAI 兼容端点（DeepSeek 等）<br/>JSON Output · 多模型可切换]
     L --> S
     S -->|"preedit / commit / done / started"| E
     S -->|"UDP 19527: rms/show/stop/polish"| O[OSD 浮窗 voiceime_osd.py<br/>GTK 声波动画]
@@ -126,7 +126,7 @@ voice-ime/
 
 **快捷键写法**：修饰键 `ctrl` / `alt` / `shift` 用 `+` 连接，末尾可加**一个**普通键（`space`、`tab`、`esc`、单个字母数字或 `` ` ``）。例：`ctrl+alt`、`ctrl+shift`、`alt+space`、`ctrl+alt+d`。两个组合不能相同；`hold_keys` 可以以 `ptt_keys` 开头（按下末尾那个键即从对讲机升级为持续模式）。配置台「快捷键」卡片可直接改，保存并重启生效；改后重启 fcitx 才会重新下发到引擎。
 
-**api_key 三种写法**：`sk-` 开头真实密钥 / UUID（内网网关）/ 恰好等于已设环境变量名（从环境读）。
+**api_key 三种写法**：`sk-` 开头真实密钥 / UUID（自建网关）/ 恰好等于已设环境变量名（从环境读）。
 
 ## 热词（专有名词补充机制）
 
@@ -233,14 +233,14 @@ fcitx-remote                        # 输入法状态（2=激活；语音需要�
 ```json
 "llm": {
   "auto_polish": true,
-  "active": "zte",
+  "active": "deepseek",
   "models": [
-    {"id": "zte", "name": "ZTE MaaS 网关",
-     "endpoint": "https://maas-apigateway.dt.zte.com.cn/model/.../v1/chat/completions",
-     "api_key": "<UUID>", "model": "deepseek-v4-flash", "system_prompt": "..."},
     {"id": "deepseek", "name": "DeepSeek 官方",
      "endpoint": "https://api.deepseek.com/v1/chat/completions",
-     "api_key": "<sk-...>", "model": "deepseek-v4-flash", "system_prompt": "..."}
+     "api_key": "<sk-...>", "model": "deepseek-chat", "system_prompt": "..."},
+    {"id": "corp", "name": "自建网关（OpenAI 兼容）",
+     "endpoint": "https://<你的网关>/v1/chat/completions",
+     "api_key": "<...>", "model": "<模型名>", "system_prompt": "..."}
   ]
 }
 ```

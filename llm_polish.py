@@ -33,7 +33,7 @@ def load_cfg():
 
     支持两种写法：
     A) 多模型（配置台推荐）：
-        {"auto_polish": false, "active": "zte",
+        {"auto_polish": false, "active": "main",
          "models": [{"id","name","endpoint","api_key","model","system_prompt"}, ...]}
        → 返回 active 指向模型的字段合并顶层 auto_polish/prompt。
     B) 旧扁平写法（兼容，逐字透传）：

@@ -5,17 +5,17 @@
 
 ## 1. 这是什么
 
-ZTE 内网环境的语音输入插件：**按住 Ctrl+Alt 说话 → 松开即停上屏（对讲机）；豆包流式 ASR 识别 → 可选 LLM 润色 → 文本提交到当前输入光标**（fcitx 4 Module addon，注册全局按键过滤器，**不占输入法位**；不碰剪贴板）。拼音输入法（搜狗）可常驻激活，打字与语音并存、无需来回切换。包含 4 个 systemd 用户服务：core（主服务）、osd（录音浮窗）、draft（草稿窗）、web（配置台）。
+Linux 桌面（X11 + fcitx 4）的语音输入插件：**按住 Ctrl+Alt 说话 → 松开即停上屏（对讲机）；豆包流式 ASR 识别 → 可选 LLM 润色 → 文本提交到当前输入光标**（fcitx 4 Module addon，注册全局按键过滤器，**不占输入法位**；不碰剪贴板）。拼音输入法（搜狗等）可常驻激活，打字与语音并存、无需来回切换。包含 4 个 systemd 用户服务：core（主服务）、osd（录音浮窗）、draft（草稿窗）、web（配置台）。
 
 ## 2. 前置条件
 
 - Linux + X11 + fcitx 4.x（不支持 Wayland；需 `fcitx-remote` 可用）
 - 麦克风（PulseAudio，`parec` 可录音）
 - 两个 Python 运行时：
-  - **Python 3.11+**（core/web/ASR/润色）：本仓库环境 `/home/0668001050/.local/bin/python3`（需 `websockets` 库）
+  - **Python 3.11+**（core/web/ASR/润色）：`~/.local/bin/python3`（需 `websockets` 库）
   - **系统 python3.6**（OSD/draft GTK 窗）：RHEL8 自带，需 `python3-gobject` + `gtk3` + `python36-cairo`
-- 内网可访问豆包 ASR：`wss://openspeech.bytedance.com/...`（外网代理可达）
-- 润色 LLM 凭证（可选）：DeepSeek 官方 sk- key 或内网 MaaS 网关 UUID key
+- 可访问豆包 ASR：`wss://openspeech.bytedance.com/...`（能上网即可，必要时走代理）
+- 润色 LLM 凭证（可选）：DeepSeek 官方 sk- key 或自建 OpenAI 兼容网关的 key
 - sudo 免密或可输密码（仅安装引擎二进制时需要）
 
 ## 3. 安装步骤
@@ -62,11 +62,11 @@ vi config.json     # 或浏览器开 http://127.0.0.1:19530 配置台
   },
   "llm": {
     "auto_polish": true,
-    "active": "zte",
+    "active": "deepseek",
     "models": [
-      {"id": "zte", "name": "ZTE MaaS 网关",
-       "endpoint": "https://maas-apigateway.dt.zte.com.cn/model/<模型>/v1/chat/completions",
-       "api_key": "<UUID key>", "model": "<模型名>", "system_prompt": "见 example"}
+      {"id": "deepseek", "name": "DeepSeek 官方",
+       "endpoint": "https://api.deepseek.com/v1/chat/completions",
+       "api_key": "<sk-...>", "model": "deepseek-chat", "system_prompt": "见 example"}
     ]
   }
 }

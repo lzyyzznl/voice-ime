@@ -1065,6 +1065,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # 页面/接口都不缓存：否则改完 JS 用户还跑旧页面（旧页面没有 Key 校验，照样能存进无效 key）
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 

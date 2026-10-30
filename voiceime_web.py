@@ -158,6 +158,36 @@ def sanitize(patch):
         errors.append("按住说话与按住持续对话不能用同一个组合")
     return clean, errors
 
+def verify_doubao(d):
+    """真连一次豆包鉴权：握手成功即视为 Key 可用（无效 Key 在握手阶段就 401）。
+    只握手不发音频，正常 1 秒内出结果。"""
+    import asr_doubao
+    asr = None
+    try:
+        asr = asr_doubao.DoubaoASR(
+            api_key=(d.get("api_key") or "").strip(),
+            resource_id=d.get("resource_id") or "volc.seedasr.sauc.duration",
+            request=d.get("request"), hotwords=[], sample_rate=16000,
+            url=asr_doubao.URL_ASYNC)
+        asr.start()
+        return True, "Key 可用"
+    except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        if "401" in msg or "unauthor" in low:
+            msg = "Key 无效（服务端 401）"
+        elif "403" in msg:
+            msg = "Key 无权限（服务端 403）"
+        elif "timeout" in low or "timed out" in low:
+            msg = "连接超时，检查网络或代理"
+        return False, msg
+    finally:
+        if asr is not None:
+            try:
+                asr.close()
+            except Exception:
+                pass
+
 
 def service_status():
     """ASR 核心存活（systemd）+ 引擎连接（socket ESTAB）+ 后端"""
@@ -413,7 +443,11 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <p class="card-desc">参数随每次识别请求下发；停顿定稿 / 首字加速按毫秒级生效。</p>
     <div class="grid" style="grid-template-columns:1fr">
       <div class="f"><label for="api_key">API Key</label>
-        <div class="pw"><input type="password" id="api_key" autocomplete="off" spellcheck="false"><button class="eye" id="eyeKey" type="button">显示</button></div></div>
+        <div class="pw"><input type="password" id="api_key" autocomplete="off" spellcheck="false"><button class="eye" id="eyeKey" type="button">显示</button></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button class="btn" id="btnVerify" type="button">校验 Key</button>
+          <span class="hint" id="keyState">未校验</span>
+        </div></div>
     </div>
     <p class="card-desc" style="margin:12px 0 0">流式端点固定为优化双向流式（<code>bigmodel_async</code>）：逐句定稿上屏、边说边预览，单次会话 300 秒兜底无缝续接。资源按 2.0 时长版。需要改动时改 <code>config.json</code>。</p>
     <p class="card-desc" style="margin:16px 0 10px">识别参数<span style="color:var(--faint)"> · 默认值即豆包文档推荐，一般无需改</span></p>
@@ -592,6 +626,16 @@ const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
   end_window_size:800, force_to_speech_time:1000, accelerate_score:0,
   ptt_keys:"ctrl+alt", hold_keys:"ctrl+alt+space" };
 
+let verifiedKey = null;      // 校验通过时输入框里的 Key；与输入框不一致就不许保存
+function setKeyState(msg, kind){
+  const el = $("keyState");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = kind === "ok" ? "var(--green)"
+                 : kind === "err" ? "var(--red)"
+                 : kind === "warn" ? "var(--amber)" : "";
+}
+
 function fillModels(cfg){
   const llm = cfg && cfg.llm || {};
   let ms = Array.isArray(llm.models) ? llm.models : [];
@@ -676,7 +720,11 @@ function fillForm(cfg){
     if (type === "b") el.checked = !!v;
     else if (type === "n") el.value = v == null ? "" : v;
     else if (type === "l") el.value = Array.isArray(v) ? v.join("\\n") : (v == null ? "" : v);
+    else el.value = v == null ? "" : v;      // s：字符串原样回填（漏了这行 Key/快捷键都显示为空）
   }
+  // 页面加载时存着的 Key 视为已校验（它就是当前生效的）；改过之后必须重新校验
+  verifiedKey = String(getPath(cfg, "doubao.api_key") || "").trim();
+  setKeyState(verifiedKey ? "当前生效的 Key" : "未配置", verifiedKey ? "" : "warn");
 }
 function collectCfg(){
   const cfg = {};
@@ -688,6 +736,7 @@ function collectCfg(){
     if (type === "b") v = el.checked;
     else if (type === "n") v = el.value === "" ? 0 : Number(el.value);
     else if (type === "l") v = String(el.value).split(/[\\n,，;；]+/).map(s => s.trim()).filter(Boolean);
+    else v = el.value;                        // s：漏了这行，改成什么都提交不了（静默 saved）
     setPath(cfg, path, v);
   }
   cfg.llm = collectLlm();
@@ -803,7 +852,12 @@ async function post(path, body){
 }
 let saving = false;
 async function save(restart){
-  if (saving) return; saving = true;
+  if (saving) return;
+  if ($("api_key").value.trim() !== verifiedKey){
+    toast("需要先校验 API Key", "点「校验 Key」，通过后才能保存", "err", 5200);
+    return;
+  }
+  saving = true;
   const btn = restart ? $("btnSaveRestart") : $("btnSave");
   const old = btn.textContent; btn.disabled = true; btn.textContent = restart ? "保存并重启中…" : "保存中…";
   try {
@@ -920,6 +974,26 @@ $("eyeKey").addEventListener("click", () => {
   $("eyeKey").textContent = show ? "隐藏" : "显示";
 });
 
+/* ── Key 校验：不通过不许保存 ─────────────── */
+$("btnVerify").addEventListener("click", async () => {
+  const btn = $("btnVerify"), old = btn.textContent;
+  btn.disabled = true; btn.textContent = "校验中…";
+  setKeyState("正在连接豆包…");
+  try {
+    const cfg = collectCfg();
+    const r = await post("/api/verify", { doubao: cfg.doubao });
+    if (r.ok) { verifiedKey = $("api_key").value.trim(); setKeyState(r.msg || "Key 可用", "ok"); }
+    else { verifiedKey = null; setKeyState(r.msg || r.error || "校验失败", "err"); }
+  } catch (e) {
+    verifiedKey = null; setKeyState("请求失败：" + e, "err");
+  }
+  btn.disabled = false; btn.textContent = old;
+});
+$("api_key").addEventListener("input", () => {
+  if ($("api_key").value.trim() !== verifiedKey)
+    setKeyState("已修改，保存前需要重新校验", "warn");
+});
+
 /* ── 快捷键捕获：聚焦后直接按组合键 ────── */
 const MODKEY = { Control:"ctrl", Alt:"alt", Shift:"shift" };
 const PLAINKEY = { " ":"space", Tab:"tab" };
@@ -1031,6 +1105,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self._cross_site():
                 self._send(403, json.dumps({"error": "跨站请求已拒绝"}))
+                return
+            if self.path == "/api/verify":
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                d = body.get("doubao") or {}
+                if not (d.get("api_key") or "").strip():
+                    self._send(400, json.dumps({"ok": False, "msg": "API Key 为空"},
+                                               ensure_ascii=False))
+                    return
+                ok, msg = verify_doubao(d)
+                self._send(200 if ok else 400,
+                           json.dumps({"ok": ok, "msg": msg}, ensure_ascii=False))
                 return
             if self.path == "/api/config":
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))

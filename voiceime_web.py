@@ -724,7 +724,7 @@ function fillForm(cfg){
   }
   // 页面加载时存着的 Key 视为已校验（它就是当前生效的）；改过之后必须重新校验
   verifiedKey = String(getPath(cfg, "doubao.api_key") || "").trim();
-  setKeyState(verifiedKey ? "当前生效的 Key" : "未配置", verifiedKey ? "" : "warn");
+  setKeyState(verifiedKey ? "当前保存的 Key（未重新校验）" : "未配置", verifiedKey ? "" : "warn");
 }
 function collectCfg(){
   const cfg = {};

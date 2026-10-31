@@ -83,7 +83,12 @@ def convert(md: str) -> str:
         raw = lines[i]
         line = raw.rstrip()
         stripped = line.strip()
-
+        # 折叠容器原样透传（<details>/<summary>），其余行内内容照常渲染
+        if re.match(r"^</?(details|summary)\b", stripped):
+            close_list()
+            out.append(stripped)
+            i += 1
+            continue
         # 围栏代码块
         fence = re.match(r"^```(\w*)\s*$", stripped)
         if fence:

@@ -452,7 +452,7 @@ def main() -> None:
 </head>
 <body>
 <header class="doc"><div class="wrap">
-  <div class="meta"><span>FCITX 4 · MODULE ADDON</span><span>豆包 SeedASR 2.0</span><span>{front_date()}</span></div>
+  <div class="meta"><span>FCITX 4 · MODULE ADDON</span><span>豆包 SeedASR 2.0</span><span>开发者：李泽宇</span><span>{front_date()}</span></div>
   <h1>{title}</h1>
 </div></header>
 <div class="wrap"><div class="layout">

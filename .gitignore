@@ -11,3 +11,6 @@ __pycache__/
 # 编译产物
 fcitx-engine/*.so
 fcitx-engine/*.o
+
+# 说明书目录里的 HTML 是 素材/md2html.py 的生成物（1 MB+，逐次发版都会变）
+2026-09-09~进行中-voice-ime构建安装与排障/*.html

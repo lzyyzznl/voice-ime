@@ -298,6 +298,20 @@ static boolean phys_combo_down(Display* dpy, const char* keys, int mods,
         return phys_mods_exact(dpy, keys, mods);
     return phys_key_down(dpy, keys, (KeySym)key);
 }
+/* 字母键归一（A-Z→a-z）：Ctrl+Alt+字母 会被 XKB 抬升为大写 keysym（实测按 o 收到
+   sym=0x4f 'O' 而非 0x6f），配置侧已把大写拼写归一为小写，事件侧同样向小写归一，
+   字母组合（持续对话等）在各大小写层下都能匹配。非字母键不受影响。 */
+static FcitxKeySym canon_key(FcitxKeySym s)
+{
+    if (s >= 'A' && s <= 'Z')
+        return (FcitxKeySym)(s + ('a' - 'A'));
+    return s;
+}
+
+static boolean combs_key_eq(FcitxKeySym a, FcitxKeySym b)
+{
+    return canon_key(a) == canon_key(b);
+}
 
 /* press 判定（严格）：按下的键必须属于组合。纯修饰组合要求修饰键恰好齐全，
    含普通键的组合允许额外修饰键（避免 Ctrl+Alt+Space 与 Ctrl+Alt+Shift+Space 互斥）。 */
@@ -306,7 +320,7 @@ static boolean combo_match(VoiceIM* im, int mods, FcitxKeySym key, FcitxKeySym s
     int m = im_mods(im);
     if (key == 0)
         return is_modifier(sym) && m == mods;
-    return sym == key && (m & mods) == mods;
+    return combs_key_eq(sym, key) && (m & mods) == mods;
 }
 
 /* release 判定（宽松）：组合是否仍按住。额外修饰键不影响，避免松开无关键误停。 */
@@ -314,8 +328,9 @@ static boolean combo_held(VoiceIM* im, int mods, FcitxKeySym key)
 {
     if ((im_mods(im) & mods) != mods)
         return false;
-    return key == 0 || im->active_key == key;
+    return key == 0 || combs_key_eq(im->active_key, key);
 }
+
 
 static VoiceIM* g_voiceim = NULL;   /* fcitx 单实例 */
 
@@ -972,18 +987,19 @@ static boolean VoiceInputFilter(void* arg, FcitxKeySym sym, unsigned int state,
     /* 普通键：命中组合才记录 active_key（避免无关按键干扰组合判定），
        并在组合已生效时消费该键——否则按住说话时这个键（空格等）的
        自动重复会被打进当前输入框。组合未按满则透传，不影响正常打字。 */
-    if (sym == im->ptt_key || sym == im->hold_key)
+    if (combs_key_eq(sym, im->ptt_key) || combs_key_eq(sym, im->hold_key))
         im->active_key = sym;
     /* 组合外的普通键：这轮 Ctrl/Alt 按住是别的程序的快捷键（Ctrl+Alt+Z 等），
        本轮不再允许触发语音，直到修饰键全部松开。否则先按 Ctrl+Alt 再敲键，
        长按判定照样在 hold_ms 后开工。 */
-    if (sym != im->ptt_key && sym != im->hold_key
+    if (!combs_key_eq(sym, im->ptt_key) && !combs_key_eq(sym, im->hold_key)
         && !im->triggered && (im->ctrl_down || im->alt_down))
         im->mods_dirty = true;
     arm_review_combo(im, sym);
     if (combo_match(im, im->hold_mods, im->hold_key, sym)
         || combo_match(im, im->ptt_mods, im->ptt_key, sym)
-        || (im->recording && (sym == im->ptt_key || sym == im->hold_key))) {
+        || (im->recording && (combs_key_eq(sym, im->ptt_key)
+                              || combs_key_eq(sym, im->hold_key)))) {
         *retval = IRV_DO_NOTHING;
         return true;
     }
@@ -1035,7 +1051,7 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
             im->ctrl_down, im->alt_down, im->shift_down, im->recording);
 
     /* 松开普通键：清 active_key，供组合是否仍按住的判定 */
-    if (!is_modifier(sym) && im->active_key == sym)
+    if (!is_modifier(sym) && combs_key_eq(im->active_key, sym))
         im->active_key = 0;
 
     if (is_ctrl(sym)) {

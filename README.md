@@ -3,7 +3,7 @@
 > **安装与使用：见 [INSTALL.md](INSTALL.md)**（面向 AI 代理的分步指南）
 
 在 Linux 桌面（X11 + fcitx 4）上，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
-**默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**——不碰剪贴板，一句话说完松手即可。
+**默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**；未聚焦输入框时使用同一快捷键，完整识别结束后文本会写入系统剪贴板，并在浮窗提示“已复制到剪贴板”。
 
 > 快捷键可改：**按住说话** 与 **按住持续对话** 两组组合在配置台「快捷键」卡片里设置（`ptt_keys` / `hold_keys`）。
 > 不抢应用快捷键：按住 Ctrl+Alt 时若又按下别的键（iCenter 的 Ctrl+Alt+Z、终端 Ctrl+Alt+T 等），引擎会放弃本次录音，把它留给应用。
@@ -14,17 +14,18 @@
 
 ```mermaid
 flowchart LR
-    E[fcitx 插件 voiceime.c<br/>fcitx4 Module addon<br/>全局 pre-input / pre-release 过滤器] -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
+    E[fcitx 插件 voiceime.c<br/>fcitx4 Module addon<br/>按键过滤器 + 无输入框按键轮询] -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
     S -->|"parec 16kHz PCM<br/>200ms 音频帧 · 独立发送线程（不阻塞录音）"| R[Recorder]
     R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 async 双向流式]
     A -->|"interim / definite final"| S
     S -->|"auto_polish 开启时"| L[润色: llm_polish.py<br/>OpenAI 兼容端点（DeepSeek 等）<br/>JSON Output · 多模型可切换]
     L --> S
     S -->|"preedit / commit / done / started"| E
-    S -->|"UDP 19527: rms/show/stop/polish"| O[OSD 浮窗 voiceime_osd.py<br/>GTK 声波动画]
+    S -->|"UDP 19527: rms/show/stop/polish/clipboard"| O[OSD 浮窗 voiceime_osd.py<br/>GTK 声波动画 + 剪贴板]
     S -->|"UDP 19528: text/clear/show"| D[草稿窗 voiceime_draft.py<br/>GTK 文本暂存 + 优化按钮]
     W[Web 配置台 voiceime_web.py<br/>127.0.0.1:19530<br/>配置 / 输入历史] -->|"HTTP /api/config · /api/history"| S
-    E -->|"FcitxInstanceCommitString"| X[XIM 管线 → 当前应用]
+    E -->|"有输入框：FcitxInstanceCommitString"| X[XIM 管线 → 当前应用]
+    O -->|"无输入框：Gtk.Clipboard"| C[系统剪贴板]
 ```
 
 **四个 systemd 用户服务**（`~/.config/systemd/user/`，均 Restart=always）：
@@ -32,7 +33,7 @@ flowchart LR
 | 单元 | 文件 | 端口/通道 | 说明 |
 |---|---|---|---|
 | `voiceime-core` | `voice_ime_service.py` | Unix socket + UDP 19527/19528 + UDP 19529(草稿控制) | 主服务：录音/ASR/润色/上屏 |
-| `voiceime-osd` | `voiceime_osd.py` | UDP 19527 | 录音指示浮窗（声波动画，随润色状态变色） |
+| `voiceime-osd` | `voiceime_osd.py` | UDP 19527 | 录音指示浮窗、剪贴板写入与完成提示 |
 | `voiceime-draft` | `voiceime_draft.py` | UDP 19528 | 草稿窗口（暂存 + 一键 LLM 优化） |
 | `voiceime-web` | `voiceime_web.py` | HTTP 127.0.0.1:19530 | Web 配置台（改配置/多模型/输入历史/日志/重启） |
 
@@ -69,7 +70,7 @@ voice-ime/
 | 按键 | 作用 |
 |---|---|
 | **Ctrl+Alt 按住** | 开始录音（≥0.3s 防误触，提示音 + 声波浮窗） |
-| **松开 Ctrl/Alt** | B 对讲机：停止并上屏 |
+| **松开 Ctrl/Alt** | B 对讲机：输入框内上屏；无输入框时识别完成后复制到剪贴板 |
 | **Ctrl+Alt+Tab** | 切换 A 持续 / B 对讲机模式（默认 B） |
 | **Escape** | A 持续模式：停止提交 |
 | **单独按 Ctrl** | A 持续录音中：切草稿窗（再按切回） |
@@ -78,13 +79,16 @@ voice-ime/
 > **快捷键可自定义**：`ptt_keys`（按住说话）与 `hold_keys`（按住持续对话）默认 `ctrl+alt` / `ctrl+alt+space`，在配置台「快捷键」卡片改，保存并重启后生效。下表其余按键（Tab 切模式、Esc、Ctrl/Shift 草稿入口）固定。
 
 1. 保持拼音输入法（搜狗）激活即可；`fcitx-remote` 返回 `2` 表示 fcitx 已激活（否则按 Ctrl+Space 激活）
-2. 聚焦目标输入框
-3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停上屏；或 **Ctrl+Alt+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
-4. 停顿处句子自动上屏（VAD 500ms 定稿）
-5. `auto_polish: true`（Web 配置台开关）时每句先经 LLM 润色再上屏
+2. 聚焦目标输入框时结果直接上屏；未聚焦输入框时结果写入系统剪贴板
+3. **对讲机 B**：按住 Ctrl+Alt 说话，松开即停；或 **Ctrl+Alt+Tab** 切到持续 A 按住说话、松手继续录、Escape 停
+4. 停顿处句子自动定稿（VAD 500ms）；输入框内即时上屏，剪贴板模式先累积
+5. `auto_polish: true`（Web 配置台开关）时每句先经 LLM 润色再输出
+
+无输入框模式会在 ASR 定稿和可选润色全部完成后写入剪贴板，浮窗显示“已复制到剪贴板”约 1.8 秒；录制中仍可查看声波浮窗。
 
 **自动润色行为**（`llm.auto_polish`）：
-- 每句定稿 → 候选栏先显示原句（等待期不空白）→ LLM 润色 → 润色结果上屏
+- 有输入框时：每句定稿 → 候选栏先显示原句（等待期不空白）→ LLM 润色 → 润色结果上屏
+- 无输入框时：候选栏不更新，所有定稿与润色完成后整段写入剪贴板
 - 浮窗声波随状态变色：**亮黄**=润色中，**红**=润色失败（已回落原文，1.5s 自动恢复）
 - 上下文 = 最近 3 个语义句（仅原文，供模型理解语境，禁止串句输出）
 - 积压降级：前一句未润色完时新句直接原文上屏（保顺序，延迟有上界）
@@ -223,7 +227,7 @@ tail -f logs/voiceime-engine.log    # 引擎：按键、preedit/commit
 tail -f logs/voiceime-service.log   # core：命令/录音/识别/润色耗时
 tail -f logs/voiceime-osd.log       # 浮窗
 ss -x | grep voiceime               # 引擎↔core 连接（1 条 ESTAB）
-fcitx-remote                        # 输入法状态（2=激活；语音需要激活态）
+fcitx-remote                        # 输入法状态（输入框上屏需激活；剪贴板模式仅需 fcitx 进程运行）
 ```
 
 ## 润色模型接入（多模型）

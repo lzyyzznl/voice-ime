@@ -6,7 +6,8 @@ voice-ime 语音服务（fcitx 引擎后端）
 Unix socket IPC 服务：接收 fcitx 引擎命令，执行录音 + 流式 ASR，推送结果。
 
 协议（JSON 行，\n 分隔）：
-  引擎 → 服务: {"cmd":"start"} / {"cmd":"stop"} / {"cmd":"cancel"} / {"cmd":"ping"}
+  引擎 → 服务: {"cmd":"start", "clipboard":true|false} / {"cmd":"stop"} /
+               {"cmd":"cancel"} / {"cmd":"ping"}
   服务 → 引擎: {"type":"ready"}
                {"type":"preedit","text":"..."}   中间结果/状态提示
                {"type":"commit","text":"..."}    最终提交文本
@@ -489,6 +490,8 @@ class VoiceIMEService:
             self.committed = 0      # 已即时 commit 的 final 条数（stop 时跳过）
             self.generation = 0     # 会话代际：start 递增，旧 auto_stop 定时器据此失效
             self.drafting = False   # 录音中单按 Ctrl 切换：识别结果进草稿窗口（默认直接上屏）
+            self.clipboard_output = False
+            self.clipboard_parts = []
             self.last_interim_text = ""  # 最新累积 interim 文本（停顿时兜底提交，防末句丢失）
             # 自动润色：串行队列保证上屏顺序（润色慢于后续句到达时，绝不能乱序）
             self.polish_q = queue.Queue()
@@ -532,6 +535,8 @@ class VoiceIMEService:
         if session.drafting:
             # 草稿模式（录音中单按 Ctrl 切换）：中间结果进草稿窗口，不上屏
             self._draft_send({"type": "text", "mode": "interim", "text": p["text"]})
+        elif session.clipboard_output:
+            pass
         else:
             session.send({"type": "preedit", "text": p["text"]})
             # 浮窗只显示声波：文本已上屏/在候选栏，不再重复显示（避免遮挡）
@@ -577,7 +582,11 @@ class VoiceIMEService:
         用户连续说话时 VAD 800ms 才切一条 final（一条可含几十秒内容），
         按条裁剪会让 recent 累积成"最近 1 分钟所有内容"。
         """
-        session.send({"type": "commit", "text": text})
+        if session.clipboard_output:
+            with session.lock:
+                session.clipboard_parts.append(text)
+        else:
+            session.send({"type": "commit", "text": text})
         session.recent.extend(self._split_sentences(orig))
         del session.recent[:-llm_polish.CONTEXT_N]
         record_history(orig, text, polished=polished, fallback=fallback, ms=ms)
@@ -593,7 +602,8 @@ class VoiceIMEService:
             polished = fallback = False
             ms = 0
             if polish:
-                session.send({"type": "preedit", "text": text})   # 先显示原文，别让候选栏空着
+                if not session.clipboard_output:
+                    session.send({"type": "preedit", "text": text})   # 先显示原文，别让候选栏空着
                 self._osd_send({"type": "polish", "state": "on"})          # P5: 声波变橙（润色中）
                 try:
                     cfg = llm_polish.load_cfg()
@@ -614,7 +624,8 @@ class VoiceIMEService:
                     self._osd_send({"type": "polish", "state": "off"})     # 润色成功，恢复
             self._send_commit(session, out, orig=text, polished=polished,
                               fallback=fallback, ms=ms)
-            session.send({"type": "preedit", "text": ""})   # commit 已上屏，清空候选栏
+            if not session.clipboard_output:
+                session.send({"type": "preedit", "text": ""})   # commit 已上屏，清空候选栏
             with session.lock:
                 session.polish_outstanding -= 1
                 if session.polish_outstanding <= 0:
@@ -685,16 +696,21 @@ class VoiceIMEService:
         except Exception as e:
             log.warning("预热录音流失败: %s", e)
 
-    def start_session(self, session, silent=False):
+    def start_session(self, session, silent=False, clipboard=False):
         # ── 锁快路径：只做本地装配（毫秒级），网络握手交给后台线程 ──
         with session.lock:
             if session.asr or session.rec:
                 return   # 已在录音（浮窗持续指示中）
+            if session.stopping:
+                session.send({"type": "done", "ok": False})
+                return
             session.cancel_pending = False   # 新 start 清除历史取消标记
             session.stopping = False
             session.committed = 0   # 本轮从零计数：不漏重置会跨轮错位 finals[committed:] 切片
             # 每次录音默认直接上屏：上一轮录音里切过的草稿模式不延续到本轮
             session.drafting = False
+            session.clipboard_output = bool(clipboard)
+            session.clipboard_parts = []
             # 新一轮录音 = 新的语义上下文（Session 随引擎连接常驻，不清会串上一轮内容）
             session.recent = []
 
@@ -764,7 +780,8 @@ class VoiceIMEService:
         threading.Thread(target=auto_stop, daemon=True).start()
 
         # focus_lost_stop=true：失去焦点自动停止录音并释放麦克风
-        if self.cfg.get("focus_lost_stop", False) and self._xfocus.current() is not None:
+        if (not clipboard and self.cfg.get("focus_lost_stop", False)
+                and self._xfocus.current() is not None):
             threading.Thread(target=self._watch_focus,
                              args=(session, gen), daemon=True).start()
 
@@ -979,11 +996,14 @@ class VoiceIMEService:
             session.rec = None
             session.asr = None
             session.stopping = True   # 挡 on_final 即时提交，剩余统一由本函数收尾
+            clipboard_output = session.clipboard_output
         if rec is None and asr is None:
             # 会话本就空闲（观察者连接/重复 stop）：仅回 done。
             # 注意不能只看 asr：60s 切换的空窗期 asr=None 但 rec 仍在录音，
             # 此时必须继续走停止流程，否则录音流静默残留（浮窗消失、快捷键失灵）
             session.send({"type": "done", "ok": False})
+            with session.lock:
+                session.stopping = False
             return False
         with self.clients_lock:
             if self._rec_count > 0:
@@ -1016,6 +1036,8 @@ class VoiceIMEService:
                     self._draft_send({"type": "text", "mode": "final", "text": rem_drop})
             session.send({"type": "preedit", "text": ""})
             session.send({"type": "done", "ok": False})
+            with session.lock:
+                session.stopping = False
             return True
         text = "".join(finals).strip()
         log.info("识别结果: %r (已即时提交 %d 句)", text, committed)
@@ -1037,6 +1059,17 @@ class VoiceIMEService:
                 # 等润色上屏后再发 done：done 会让引擎复位 recording，若先发，
                 # 用户立刻开始下一轮录音时旧句会落到新窗口
                 session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
+        if clipboard_output:
+            session.polish_idle.wait(timeout=llm_polish.DEFAULT_TIMEOUT + 3)
+            with session.lock:
+                clipboard_text = "".join(session.clipboard_parts).strip()
+            if clipboard_text:
+                self._osd_send({"type": "clipboard", "text": clipboard_text,
+                                "message": "已复制到剪贴板"})
+                log.info("剪贴板结果: %r", clipboard_text)
+            session.send({"type": "preedit", "text": ""})
+            session.send({"type": "done", "ok": bool(clipboard_text)})
+        elif rem_text:
             session.send({"type": "preedit", "text": ""})
             session.send({"type": "done", "ok": True})
         elif text:
@@ -1045,6 +1078,8 @@ class VoiceIMEService:
         else:
             session.send({"type": "preedit", "text": ""})
             session.send({"type": "done", "ok": False})
+        with session.lock:
+            session.stopping = False
         return True
 
     def cancel_session(self, session):
@@ -1084,7 +1119,9 @@ class VoiceIMEService:
         cmd = msg.get("cmd")
         log.info("收到命令: %s", cmd)
         if cmd == "start":
-            threading.Thread(target=self.start_session, args=(session,), daemon=True).start()
+            clipboard = bool(msg.get("clipboard"))
+            threading.Thread(target=self.start_session,
+                             args=(session, False, clipboard), daemon=True).start()
         elif cmd == "stop":
             # 对讲机松开/ESC：标记取消（覆盖启动握手期：start_session 完成握手后自停）
             with session.lock:

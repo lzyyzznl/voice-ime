@@ -3,17 +3,17 @@
  * ============================================
  * 注册全局 pre-input / pre-release 按键过滤器，因此**不占用输入法位**：
  *   - 拼音输入法（搜狗）可常驻激活，字母照常打中文
- *   - Ctrl+Alt 按住 ≥300ms 触发录音（任意输入法激活时都生效）
- *   - 松开 Ctrl/Alt：对讲机 B 模式 → 停止并提交（默认）
+ *   - Ctrl+Alt 按住 ≥300ms 触发录音（输入框内和桌面均生效）
+ *   - 松开 Ctrl/Alt：对讲机 B 模式 → 停止；有输入框上屏，无输入框写剪贴板
  *   - Ctrl+Alt+Tab 切换 B 对讲机 / A 持续模式；A 下 Escape 停止提交
  *   - 录音中单独 Ctrl（A）或空闲 Ctrl+Alt+Shift 三键（B）→ 切草稿窗
  *   - ASR 中间结果 → preedit 实时更新（20ms 主循环轮询队列）
  *
  * 通过 Unix socket 与 Python 语音服务（voice_ime_service.py）通信。
- * 不依赖剪贴板：文本经 fcitx 的 XIM 管线直接提交。
+ * 有输入上下文时经 fcitx 的 XIM 管线提交；无输入上下文时由服务写入剪贴板。
  *
- * 前提：fcitx 处于激活状态（IS_ACTIVE）。Ctrl+Space 关闭输入法后 fcitx
- * 不派发 filter，语音与拼音会同时失效。
+ * 前提：fcitx 进程运行。输入框路径依赖激活态按键过滤器；桌面剪贴板路径
+ * 直接读取 X11 物理按键状态，不依赖当前输入法是否激活。
  */
 #include <fcitx/fcitx.h>
 #include <fcitx/hook.h>
@@ -144,6 +144,12 @@ struct _VoiceIM {
     boolean triggered;              /* 本次按下已触发（防 repeat） */
     boolean esc_pressed;            /* Escape 按下状态（防 repeat） */
     boolean tri_pressed;            /* Ctrl+Alt+Shift 三键齐按过（空闲松手切草稿） */
+    boolean clipboard_output;       /* 本轮识别结果写入剪贴板，不提交到应用 */
+    boolean global_armed;           /* 无输入上下文时检测到触发组合，等待长按判定 */
+    boolean global_armed_hold;      /* 全局触发的目标模式 */
+    boolean global_triggered;       /* 全局触发组合已处理，等待释放 */
+    boolean global_dirty;           /* 全局候选中出现组合外按键 */
+    boolean global_escape_down;     /* 全局 Escape 按下状态 */
     int hold_ms;                    /* 长按触发阈值（服务端 config 下发） */
     /* 可配置触发组合（服务端 config 下发）：mods 位掩码 + 可选普通键 */
     int ptt_mods;                   /* 按住说话（对讲机）组合的修饰键 */
@@ -153,6 +159,7 @@ struct _VoiceIM {
     FcitxKeySym active_key;         /* 当前按住的普通键，组合判定用 */
     boolean armed_hold;             /* 本次 armed 的目标模式：true=持续 A */
     struct timespec press_time;     /* Ctrl+Alt 同时按下的时刻 */
+    struct timespec global_press_time;
     volatile gboolean recv_running;
     long long last_reconnect_ms;    /* 上次重连时间（poll_queue_cb 限速用） */
     GThread* recv_thread;
@@ -249,6 +256,49 @@ static boolean phys_mods_held(VoiceIM* im, int mods)
     return true;
 }
 
+static boolean phys_mods_exact(Display* dpy, const char* keys, int mods)
+{
+    boolean ctrl = phys_key_down(dpy, keys, XK_Control_L)
+                || phys_key_down(dpy, keys, XK_Control_R);
+    boolean alt = phys_key_down(dpy, keys, XK_Alt_L)
+               || phys_key_down(dpy, keys, XK_Alt_R);
+    boolean shift = phys_key_down(dpy, keys, XK_Shift_L)
+                 || phys_key_down(dpy, keys, XK_Shift_R);
+    return ctrl == !!(mods & MOD_CTRL)
+        && alt == !!(mods & MOD_ALT)
+        && shift == !!(mods & MOD_SHIFT);
+}
+
+static boolean phys_any_mod_down(Display* dpy, const char* keys)
+{
+    return phys_key_down(dpy, keys, XK_Control_L)
+        || phys_key_down(dpy, keys, XK_Control_R)
+        || phys_key_down(dpy, keys, XK_Alt_L)
+        || phys_key_down(dpy, keys, XK_Alt_R)
+        || phys_key_down(dpy, keys, XK_Shift_L)
+        || phys_key_down(dpy, keys, XK_Shift_R);
+}
+
+static boolean phys_combo_down(Display* dpy, const char* keys, int mods,
+                               FcitxKeySym key)
+{
+    if ((mods & MOD_CTRL)
+        && !phys_key_down(dpy, keys, XK_Control_L)
+        && !phys_key_down(dpy, keys, XK_Control_R))
+        return false;
+    if ((mods & MOD_ALT)
+        && !phys_key_down(dpy, keys, XK_Alt_L)
+        && !phys_key_down(dpy, keys, XK_Alt_R))
+        return false;
+    if ((mods & MOD_SHIFT)
+        && !phys_key_down(dpy, keys, XK_Shift_L)
+        && !phys_key_down(dpy, keys, XK_Shift_R))
+        return false;
+    if (key == 0)
+        return phys_mods_exact(dpy, keys, mods);
+    return phys_key_down(dpy, keys, (KeySym)key);
+}
+
 /* press 判定（严格）：按下的键必须属于组合。纯修饰组合要求修饰键恰好齐全，
    含普通键的组合允许额外修饰键（避免 Ctrl+Alt+Space 与 Ctrl+Alt+Shift+Space 互斥）。 */
 static boolean combo_match(VoiceIM* im, int mods, FcitxKeySym key, FcitxKeySym sym)
@@ -270,12 +320,15 @@ static boolean combo_held(VoiceIM* im, int mods, FcitxKeySym key)
 static VoiceIM* g_voiceim = NULL;   /* fcitx 单实例 */
 
 static void dbg_log(const char* fmt, ...);  /* 前向声明 */
+static void send_cmd(VoiceIM* im, const char* json);
 static void* recv_loop(void* arg);  /* 前向声明（restart_recv 使用） */
 static void refresh_ui(VoiceIM* im);  /* 前向声明 */
 static void toggle_rec_mode(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void toggle_draft(VoiceIM* im);  /* 前向声明（DoReleaseInput 使用） */
 static void stop_and_submit(VoiceIM* im);  /* 前向声明（DoInput 使用） */
 static void stop_recording_on_lost_focus(VoiceIM* im);  /* 前向声明（poll_queue_cb 使用） */
+static void start_recording(VoiceIM* im, boolean clipboard, boolean hold_mode);
+static void global_shortcut_tick(VoiceIM* im, FcitxInputContext* ic);
 
 /* 组合键按下后进入 armed，等待主循环判定 hold_ms。
    hold（持续对话）优先于 ptt（按住说话）：当前者是后者的扩展组合
@@ -294,6 +347,99 @@ static void arm_review_combo(VoiceIM* im, FcitxKeySym sym)
         im->armed_hold = false;
         clock_gettime(CLOCK_MONOTONIC, &im->press_time);
     }
+}
+
+static void start_recording(VoiceIM* im, boolean clipboard, boolean hold_mode)
+{
+    if (im->recording)
+        return;
+    im->recording = true;
+    im->mode_b = !hold_mode;
+    im->clipboard_output = clipboard;
+    send_cmd(im, im->mode_b
+                  ? "{\"cmd\":\"mode\",\"b\":1}"
+                  : "{\"cmd\":\"mode\",\"b\":0}");
+    dbg_log("长按触发 start（%s，输出=%s）",
+            im->mode_b ? "对讲机 B" : "持续 A",
+            clipboard ? "剪贴板" : "输入框");
+    send_cmd(im, clipboard
+                  ? "{\"cmd\":\"start\",\"clipboard\":true}"
+                  : "{\"cmd\":\"start\"}");
+}
+
+static void global_shortcut_tick(VoiceIM* im, FcitxInputContext* ic)
+{
+    Display* dpy = phys_display(im);
+    char keys[32];
+    boolean ptt_down, hold_down, combo_down, esc_down;
+    int target_hold;
+
+    if (!dpy)
+        return;
+    if (!XQueryKeymap(dpy, keys))
+        return;
+    ptt_down = phys_combo_down(dpy, keys, im->ptt_mods, im->ptt_key);
+    hold_down = phys_combo_down(dpy, keys, im->hold_mods, im->hold_key);
+    combo_down = ptt_down || hold_down;
+    esc_down = phys_key_down(dpy, keys, XK_Escape);
+
+    if (im->global_dirty && !phys_any_mod_down(dpy, keys))
+        im->global_dirty = false;
+
+    if (!im->recording && !ic && !im->global_triggered && !im->global_dirty) {
+        target_hold = hold_down ? 1 : (ptt_down ? 0 : -1);
+        if (target_hold >= 0) {
+            if (!im->global_armed) {
+                im->global_armed = true;
+                im->global_armed_hold = target_hold;
+                clock_gettime(CLOCK_MONOTONIC, &im->global_press_time);
+                dbg_log("全局候选触发（%s）", target_hold ? "持续 A" : "对讲机 B");
+            } else if (target_hold) {
+                im->global_armed_hold = true;
+            }
+        }
+    }
+
+    if (im->global_armed && !im->recording && !im->global_triggered) {
+        if (im->global_dirty || !combo_down) {
+            im->global_armed = false;
+        } else if (!ic) {
+            struct timespec now;
+            long ms;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            ms = (now.tv_sec - im->global_press_time.tv_sec) * 1000
+               + (now.tv_nsec - im->global_press_time.tv_nsec) / 1000000;
+            if (ms >= im->hold_ms) {
+                if (phys_extra_keys_down(im)) {
+                    dbg_log("全局候选撤销：组合外仍有按键");
+                    im->global_dirty = true;
+                    im->global_armed = false;
+                } else {
+                    boolean hold_mode = im->global_armed_hold;
+                    im->global_armed = false;
+                    im->global_triggered = true;
+                    start_recording(im, true, hold_mode);
+                }
+            }
+        } else {
+            im->global_armed = false;
+        }
+    }
+
+    if (im->global_triggered && !combo_down)
+        im->global_triggered = false;
+
+    if (im->recording && im->clipboard_output) {
+        if (esc_down && !im->global_escape_down) {
+            dbg_log("全局录制收到 Escape，停止并写入剪贴板");
+            stop_and_submit(im);
+        }
+        if (im->recording && im->mode_b && !ptt_down) {
+            dbg_log("全局触发组合已松开，停止并写入剪贴板");
+            stop_and_submit(im);
+        }
+    }
+    im->global_escape_down = esc_down;
 }
 
 /* ─────────────────────────── IPC ─────────────────────────── */
@@ -358,6 +504,12 @@ static void reset_stream_state(VoiceIM* im)
     im->tri_pressed = false;
     im->esc_pressed = false;
     im->active_key = 0;
+    im->clipboard_output = false;
+    im->global_armed = false;
+    im->global_armed_hold = false;
+    im->global_triggered = false;
+    im->global_dirty = false;
+    im->global_escape_down = false;
 }
 
 /* 写满 len 字节：socket 带 SO_SNDTIMEO，write 可能只写一部分。不补齐会让
@@ -513,6 +665,8 @@ static void poll_queue_cb(void* data)
         }
     }
 
+    global_shortcut_tick(im, FcitxInstanceGetCurrentIC(im->owner));
+
     /* 长按 ≥hold_ms → 开始录音（主循环线程，可安全调 UI）。
        模式由命中的组合决定：按住说话 → 对讲机 B；按住持续对话 → 持续 A。 */
     if (im->armed && !im->triggered) {
@@ -536,16 +690,8 @@ static void poll_queue_cb(void* data)
                 im->armed = false;
                 im->triggered = true;   /* 防 repeat：需全部释放后才重置 */
                 im->ctrl_solo = false;  /* 触发即清 solo：长按松手（Ctrl 后按时）不误切草稿 */
-                if (!im->recording) {
-                    im->recording = true;
-                    im->mode_b = !im->armed_hold;   /* hold 组合 → 持续 A，否则对讲机 B */
-                    send_cmd(im, im->mode_b
-                                  ? "{\"cmd\":\"mode\",\"b\":1}"
-                                  : "{\"cmd\":\"mode\",\"b\":0}");
-                    dbg_log("长按触发 start（%s）", im->mode_b ? "对讲机 B" : "持续 A");
-                    send_cmd(im, "{\"cmd\":\"start\"}");
-                    /* 录音指示由桌面浮窗（声波动画）呈现，不再显示文字 */
-                }
+                start_recording(im, false, im->armed_hold);
+                /* 录音指示由桌面浮窗（声波动画）呈现，不再显示文字 */
             }
         }
     }
@@ -601,6 +747,7 @@ static void poll_queue_cb(void* data)
                 im->tri_pressed = false;
                 im->armed = false;
                 im->triggered = false;
+                im->clipboard_output = false;
                 clear_preedit(im);
                 refresh_ui(im);
             }
@@ -938,8 +1085,10 @@ static boolean VoiceReleaseFilter(void* arg, FcitxKeySym sym, unsigned int state
    preedit 提交保住，cancel 防止二次输出。模式 A（持续输入）失焦不停录。 */
 static void stop_recording_on_lost_focus(VoiceIM* im)
 {
-    if (im->recording && im->mode_b) {
+    if (im->recording && im->mode_b && !im->clipboard_output) {
         im->recording = false;
+        im->global_armed = false;
+        im->global_dirty = true;
         dbg_log("即停模式：失焦停止录音（cancel 防重复）");
         send_cmd(im, "{\"cmd\":\"cancel\"}");
     }

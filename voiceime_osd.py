@@ -4,6 +4,8 @@
 监听 UDP 127.0.0.1:19527（voice_ime_service.py 发送）：
   {"rms": 123}      录音中，更新声波高度
   {"type": "stop"}  停止录音，隐藏浮窗
+  {"type": "clipboard", "text": "...", "message": "已复制到剪贴板"}
+                    写入系统剪贴板并显示完成提示
   {"type": "quit"}  退出进程
 持续无数据 800ms 自动隐藏（防 stop 漏发导致的残留）。
 
@@ -18,7 +20,7 @@ import time
 
 import gi
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, GLib, Pango, PangoCairo   # noqa: E402
+from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo   # noqa: E402
 import cairo                          # pycairo（gi 的 cairo 封装无 OPERATOR_SOURCE）
 
 UDP_ADDR = ("127.0.0.1", 19527)
@@ -36,6 +38,7 @@ BAR_MIN_H = 2
 TIMEOUT_MS = 800                      # 无数据自动隐藏
 ERR_W, ERR_H = 420, 46                # 硬错误提示卡片尺寸（比声波条宽，容得下一行字）
 ERR_MS = 4500                         # 提示停留时长
+NOTICE_MS = 1800                      # 剪贴板完成提示停留时长
 SMOOTH = 0.28                         # RMS 平滑系数（避免声波剧烈抖动）
 
 
@@ -95,6 +98,8 @@ class OSD:
         self.dw, self.dh = self.w, self.h   # load_cfg 的默认尺寸（提示卡片收起后复原）
         self.error_text = ""       # 非空 → 卡片改成红字提示（如密钥无效），不画声波
         self.error_until = 0.0     # 提示自动收起时刻（monotonic）
+        self.notice_text = ""      # 非空 → 显示绿色操作完成提示
+        self.notice_until = 0.0
         self.peak = 1.0            # 自适应峰值：不同麦克风电平下都能看出起伏
         GLib.timeout_add(40, self.tick)
 
@@ -110,7 +115,7 @@ class OSD:
     def tick(self):
         while True:
             try:
-                data, _ = self.sock.recvfrom(4096)
+                data, _ = self.sock.recvfrom(65535)
             except (BlockingIOError, OSError):
                 break
             try:
@@ -133,13 +138,26 @@ class OSD:
             elif msg.get("type") == "error":
                 # 密钥无效之类的硬错误：整条卡片换成红字提示并停留 ERR_MS。
                 # 期间的 stop 被忽略，否则停止录音会立刻把提示擦掉
+                self.notice_text = ""
                 self.error_text = str(msg.get("text") or "语音密钥无效")
                 self.error_until = time.monotonic() + ERR_MS / 1000
                 self.have_rms = False
                 self.resize(ERR_W, ERR_H)
                 self.show()
+            elif msg.get("type") == "clipboard":
+                text = str(msg.get("text") or "")
+                if text:
+                    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                    clipboard.set_text(text, -1)
+                    self.error_text = ""
+                    self.notice_text = str(msg.get("message") or "已复制到剪贴板")
+                    self.notice_until = time.monotonic() + NOTICE_MS / 1000
+                    self.have_rms = False
+                    self.resize(self.dw, self.dh)
+                    self.show()
+                    self.da.queue_draw()
             elif msg.get("type") == "stop":
-                if not self.error_text:
+                if not self.error_text and not self.notice_text:
                     self.hide()
             elif msg.get("type") == "mode":
                 self.mode_b = bool(msg.get("b", self.mode_b))
@@ -166,11 +184,13 @@ class OSD:
                 self.target_rms = max(0, rms)
                 self.last_data = time.monotonic()
                 self.show()
-        if (self.visible and self.have_rms
+        if (self.visible and self.have_rms and not self.notice_text
                 and time.monotonic() - self.last_data > TIMEOUT_MS / 1000):
             self.hide()                               # 超时无数据 → 隐藏
         if self.error_text and time.monotonic() > self.error_until:
             self.hide()                               # 提示到点自动收起
+        if self.notice_text and time.monotonic() > self.notice_until:
+            self.hide()
         if self.polish_state == "fail" and time.monotonic() > self.polish_until:
             self.polish_state = None                  # 失败红 1.5s 后自动恢复默认色
         if self.visible:
@@ -195,6 +215,7 @@ class OSD:
         self.display_rms = 0
         self.polish_state = None
         self.error_text = ""
+        self.notice_text = ""
         if (self.w, self.h) != (self.dw, self.dh):
             self.resize(self.dw, self.dh)             # 提示卡片收起 → 恢复声波条尺寸
         self.win.hide()
@@ -217,15 +238,16 @@ class OSD:
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
-        if self.error_text:
-            # 硬错误提示（密钥无效等）：红边卡片 + 居中文字，取代声波条
-            self._draw_card(cr, aw, ah, (1.0, 0.35, 0.35, 1.0))
+        if self.error_text or self.notice_text:
+            text = self.error_text or self.notice_text
+            color = (1.0, 0.35, 0.35, 1.0) if self.error_text else (0.35, 0.9, 0.62, 1.0)
+            self._draw_card(cr, aw, ah, color)
             layout = PangoCairo.create_layout(cr)
-            layout.set_text(self.error_text, -1)
+            layout.set_text(text, -1)
             layout.set_font_description(Pango.FontDescription("Sans 11"))
             tw, th = layout.get_pixel_size()
             cr.move_to(max(8, (aw - tw) / 2), max(3, (ah - th) / 2))
-            cr.set_source_rgba(1.0, 0.62, 0.62, 1.0)
+            cr.set_source_rgba(color[0], min(1.0, color[1] + 0.15), min(1.0, color[2] + 0.15), 1.0)
             PangoCairo.show_layout(cr, layout)
             return
         # 声波条只表示录音模式：青蓝=持续输入 A，橙=即停 B（松手即上屏）

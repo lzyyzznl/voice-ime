@@ -695,6 +695,18 @@ static void poll_queue_cb(void* data)
                2) 组合外还有键按着（iCenter 的 Ctrl+Alt+Z：X 键事件被对方 grab，
                   filter 收不到 Z，只能靠 XQueryKeymap 看到）；
                3) 当前没有输入上下文（弹窗夺走焦点）→ 录了也无处上屏。 */
+            /* 物理兜底：iCenter 一类窗口的 grab 会吞掉组合末尾普通键的 press 事件，
+               filter 只看到 ctrl+alt → 误判成对讲机 B（松手即停）。物理上若持续组合
+               （含末尾普通键）仍按住，则升级为持续 A。 */
+            {
+                Display* hd = phys_display(im);
+                if (hd) {
+                    unsigned char hkm[32];
+                    if (XQueryKeymap(hd, (char*)hkm)
+                        && phys_combo_down(hd, (const char*)hkm, im->hold_mods, im->hold_key))
+                        im->armed_hold = true;
+                }
+            }
             boolean extra = phys_extra_keys_down(im);
             if (im->mods_dirty || extra || !FcitxInstanceGetCurrentIC(im->owner)) {
                 dbg_log("长按判定撤销（dirty=%d 组合外按键=%d 有输入上下文=%d）",

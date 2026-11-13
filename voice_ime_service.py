@@ -69,7 +69,9 @@ def record_history(orig, text, polished=False, fallback=False, ms=0):
         log.warning("写输入历史失败: %s", e)
 
 
-BUF_MAX = 16   # 队列上限：16×200ms ≈ 3.2s。预热流空闲时也入队，必须有界，否则常驻占内存
+BUF_MAX = 40   # 队列上限：40×200ms ≈ 8s，覆盖握手慢到 5~7s 的时段（今天实测 5.7s）；预热流空闲时也入队，必须有界
+RECOVER_MIN_MS = 1000   # 松手补发门槛：缓存 ≥1s 才补（更短多半是误触，出噪声字更烦）
+ASR_WAIT_SEC = 12       # stop 等握手挂上 ASR 的上限（connect open_timeout=10 + 余量）
 
 
 # ── 录音：parec → 200ms 分片 → 路由到当前 ASR ──────────────
@@ -104,6 +106,8 @@ class Recorder(threading.Thread):
         self._buf = collections.deque(maxlen=BUF_MAX)
         self._buf_cv = threading.Condition()
         self._buf_gen = 0      # 清空代际：sender 取出但未发出的旧块据此丢弃
+        self._frozen = False   # 已松手：后续音频不再入队（慢握手补发只送真正说的话）
+        self._inflight = 0     # 已出队、还没 send_audio 完成的块数：flush 必须等它归零
 
     def route_to(self, target):
         """切换音频发送目标（None = 缓存模式，等待新连接接管）"""
@@ -113,17 +117,33 @@ class Recorder(threading.Thread):
         with self._buf_cv:
             self._buf_cv.notify_all()
 
-    def flush_pending(self):
+    def freeze(self):
+        """松手后冻结入队：握手慢时补发只含说过的音频，不带松手后的环境音。"""
+        with self._buf_cv:
+            self._frozen = True
+
+    def flush_pending(self, timeout=5):
         """新连接接管后等待积压音频发完（sender 自动等待 target 就绪）。
         没有发送目标时队列本来就发不出去，直接返回——否则会白等满超时
-        （表现为"按下就松手"要 5 秒才收到 done）。"""
+        （表现为"按下就松手"要 5 秒才收到 done）。
+        inflight 也算未发完：sender 已 popleft 但还没 ws.send 的那一块若漏等，
+        stop() 的结束帧会插到它前面，服务端报 45000000 sequence mismatch。"""
         with self._buf_cv:
             self._buf_cv.wait_for(
-                lambda: not self._buf or self._target is None, timeout=5)
+                lambda: (not self._buf and not self._inflight)
+                        or self._target is None, timeout=timeout)
+
+    def pending_ms(self):
+        """缓存队列里尚未发送的音频时长（毫秒）。"""
+        with self._buf_cv:
+            n = len(self._buf)
+        return n * self.chunk_bytes * 1000 // (self.sample_rate * 2)
 
     def _dispatch(self, chunk):
         """只入队，永不阻塞录音线程"""
         with self._buf_cv:
+            if self._frozen:
+                return
             self._buf.append(chunk)
             self._buf_cv.notify()
 
@@ -156,6 +176,7 @@ class Recorder(threading.Thread):
                          or self._buf[0] is not chunk)
                 if not stale:
                     self._buf.popleft()
+                    self._inflight += 1   # 出队即算未发完：flush 要等这一块真发出去
                 # popleft 后必须 notify：flush_pending 的 wait_for 只在被唤醒或超时后
                 # 才重查谓词，不唤醒就要干等满 timeout（表现为松手后浮窗多停 5 秒）
                 self._buf_cv.notify_all()
@@ -166,6 +187,10 @@ class Recorder(threading.Thread):
             except Exception as e:
                 log.warning("音频发送异常: %s", e)
                 ok = False
+            finally:
+                with self._buf_cv:
+                    self._inflight -= 1
+                    self._buf_cv.notify_all()
             if not ok:
                 log.warning("音频发送失败(连接已断),丢弃 1 包")
                 if self.on_send_fail and not self._fail_fired:
@@ -259,6 +284,7 @@ class Recorder(threading.Thread):
         with self._buf_cv:
             self._buf.clear()
             self._buf_gen += 1   # 让已取出、尚未发送的那一块也作废
+            self._frozen = False # 新一轮录音开始：恢复入队
             self._buf_cv.notify_all()
 
     def idle(self):
@@ -503,6 +529,7 @@ class VoiceIMEService:
             self.cancel_pending = False # 启动握手期收到 stop（对讲机松开）：握手完成后自停
             self.stopping = False       # stop 已开始：on_final 停止即时提交，由 stop 统一收尾
             self.switching = False      # 正在换代续录：stop 需等它结束再收尾，否则缓存音频无人消费
+            self.attaching = False      # ASR 握手线程在跑：stop 需等它挂上再收尾（慢握手时靠缓存补发）
 
     def _make_asr(self, session):
         """构造 ASR 客户端（豆包 bigmodel_async），回调接口：interim / final"""
@@ -705,6 +732,7 @@ class VoiceIMEService:
                 session.send({"type": "done", "ok": False})
                 return
             session.cancel_pending = False   # 新 start 清除历史取消标记
+            session.attaching = True         # 握手线程即将启动：stop 需等它挂上再收尾
             session.stopping = False
             session.committed = 0   # 本轮从零计数：不漏重置会跨轮错位 finals[committed:] 切片
             # 每次录音默认直接上屏：上一轮录音里切过的草稿模式不延续到本轮
@@ -787,6 +815,13 @@ class VoiceIMEService:
 
     def _attach_asr(self, session, gen):
         """后台建立 ASR，完成后接管已在录音的音频流（缓存先行，内容零丢失）"""
+        try:
+            self._attach_asr_impl(session, gen)
+        finally:
+            with session.lock:
+                session.attaching = False   # 握手已定论：唤醒 stop_session 的等待
+
+    def _attach_asr_impl(self, session, gen):
         with session.lock:
             if session.generation != gen or session.rec is None:
                 return      # 还没开始握手，会话就被停止/换代了
@@ -823,7 +858,17 @@ class VoiceIMEService:
             rec = session.rec
             cancelled = session.cancel_pending
         if cancelled:
-            log.info("握手完成时用户已松手，直接收尾")
+            buffered = rec.pending_ms()
+            # 握手完成时用户已松手：音频还压在本地缓存，一包都没发出去（服务端会报
+            # 45000002 No audio）。缓存够长就补发再收尾——慢握手（实测 5.7s）下这是
+            # 整段话语唯一的挽救机会；太短多半是误触，出噪声字更烦，维持原行为。
+            if buffered >= RECOVER_MIN_MS:
+                log.info("握手完成时用户已松手，补发缓存音频 %d ms 后收尾", buffered)
+                rec.route_to(asr)
+                rec.flush_pending(timeout=10)   # 缓存最长 8s：慢网络也要发完再收尾
+            else:
+                log.info("握手完成时用户已松手（缓存 %d ms，不足 %d），直接收尾",
+                         buffered, RECOVER_MIN_MS)
             threading.Thread(target=self.stop_session, args=(session, gen, False),
                              daemon=True).start()
             return
@@ -979,20 +1024,23 @@ class VoiceIMEService:
         # 会话切换/握手空窗期（asr 尚未挂上、rec 仍在录音）：此刻收尾会让这一轮
         # 缓存的音频没人消费而丢失（实测松手正好撞上 12s 切换 → 整段不上屏）。
         # 以"rec 是否还是同一条录音流"判断会话归属：切换会换代但 rec 不变，
-        # 只有真正的新一轮 start/已收尾才换 rec。等新 ASR 挂上再正常收尾，
-        # 最多 3s，避免引擎长时间卡在录音态。
-        deadline = time.time() + 3
+        # 只有真正的新一轮 start/已收尾才换 rec。等新 ASR 挂上再正常收尾
+        # （慢握手实测 5.7s，故上限取 ASR_WAIT_SEC），避免引擎长时间卡在录音态。
+        deadline = time.time() + ASR_WAIT_SEC
         while rec0 is not None and time.time() < deadline:
             with session.lock:
-                if session.switching:
-                    pass            # 换代续录进行中：等它挂上新 ASR 再收尾
-                elif session.rec is not rec0 or session.asr is not None:
-                    break
+                if session.cancel_pending and rec0.pending_ms() < RECOVER_MIN_MS:
+                    break       # 松手且缓存太短：没有值得等握手的音频，立刻收尾
+                waiting = (session.rec is rec0 and session.asr is None
+                           and (session.switching or session.attaching))
+            if not waiting:
+                break           # 已挂上 ASR / 换代完成 / 握手已定论：立刻收尾
             time.sleep(0.05)
         with session.lock:
             if session.rec is not rec0:
                 return False       # 已被另一路 stop 收尾，或新一轮录音已接管
             rec, asr = session.rec, session.asr
+            was_stopping = session.stopping
             session.rec = None
             session.asr = None
             session.stopping = True   # 挡 on_final 即时提交，剩余统一由本函数收尾
@@ -1001,9 +1049,12 @@ class VoiceIMEService:
             # 会话本就空闲（观察者连接/重复 stop）：仅回 done。
             # 注意不能只看 asr：60s 切换的空窗期 asr=None 但 rec 仍在录音，
             # 此时必须继续走停止流程，否则录音流静默残留（浮窗消失、快捷键失灵）
-            session.send({"type": "done", "ok": False})
+            # 另一路 stop 已在收尾时不要再回 done：它会带着真结果回，先回
+            # ok=false 会让引擎提前复位，识别结果落到下一个窗口。
+            if not was_stopping:
+                session.send({"type": "done", "ok": False})
             with session.lock:
-                session.stopping = False
+                session.stopping = was_stopping   # 不抢并发收尾方的标志
             return False
         with self.clients_lock:
             if self._rec_count > 0:
@@ -1123,9 +1174,13 @@ class VoiceIMEService:
             threading.Thread(target=self.start_session,
                              args=(session, False, clipboard), daemon=True).start()
         elif cmd == "stop":
-            # 对讲机松开/ESC：标记取消（覆盖启动握手期：start_session 完成握手后自停）
+            # 对讲机松开：标记取消（覆盖启动握手期，由 _attach_asr 决定补发或丢弃）。
+            # 冻结入队：松手后到握手完成之间的环境音不再进缓存，补发只送说过的话。
             with session.lock:
                 session.cancel_pending = True
+                rec = session.rec
+            if rec:
+                rec.freeze()
             if session.rec or session.asr:
                 # 引擎等录音连接：会话级停止（rec/asr 任一存在即会话活动中，
                 # 含 60s 切换空窗期 asr=None 但 rec 在录音的情况）

@@ -78,7 +78,7 @@ MD5 必须是 8eb444a8451c6c97f790653b6c45aa8f，不一致就重新下载。
         cp config.example.json config.json && echo "新配置已生成，engine=doubao，需要填 KEY"
     fi
 - 输出的 key 长度大于 0：跳过本步，不要问用户要密钥。
-- key 为空：**问用户选哪个识别引擎**（只问这一个问题）：
+- key 为空：问用户选哪个识别引擎（只问这一个问题）：
   · DeepSeek（推荐）：platform.deepseek.com 创建 API Key，形如 sk-xxxxxxxx，不需要开通任何服务。
   · 豆包 SeedASR（流式）：需先在火山引擎语音技术控制台开通「流式语音识别 2.0」再创建 API Key（一串 UUID），步骤见说明书「识别引擎与密钥」。
   用户没有偏好时用 DeepSeek。

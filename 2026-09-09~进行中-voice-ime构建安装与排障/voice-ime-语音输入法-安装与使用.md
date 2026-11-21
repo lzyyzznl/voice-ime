@@ -36,7 +36,7 @@ Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光�
 
 ```text
 【任务】
-在这台 Linux 机器上安装或更新 voice-ime 语音输入法：fcitx4 插件 + 豆包流式语音识别，说话即出字，不占用输入法位（拼音照常可用）。这一段步骤全新安装和升级通用——第 2 步先判断是哪种，其余步骤一样跑。安装包里的引擎已经编译好，不需要 gcc、make 或 fcitx-devel。请一步一步执行，每步做完报告结果；某一步失败就停下来说明现象，不要跳过、不要自己换方案。
+在这台 Linux 机器上安装或更新 voice-ime 语音输入法：fcitx4 插件 + 语音识别（豆包流式，默认；可在配置台切换为 DeepSeek 非流式），说话即出字，不占用输入法位（拼音照常可用）。这一段步骤全新安装和升级通用——第 2 步先判断是哪种，其余步骤一样跑。安装包里的引擎已经编译好，不需要 gcc、make 或 fcitx-devel。请一步一步执行，每步做完报告结果；某一步失败就停下来说明现象，不要跳过、不要自己换方案。
 
 【第 1 步：确认环境】
 这是 Linux + fcitx4 桌面（X11 或 xrdp）。
@@ -48,14 +48,14 @@ Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光�
     cat ~/workspace/voice-ime/VERSION 2>/dev/null \
       || { [ -d ~/workspace/voice-ime ] && echo "旧版(无 VERSION 文件)" || echo "全新安装"; }
 - 输出「全新安装」→ 第 5 步必须问用户要密钥。
-- 输出「旧版(无 VERSION 文件)」或旧版本号（如 2026.10.29.11）→ 更新：第 5 步跳过，完成后告诉用户从哪个版本升到 2026.10.29.12。
+- 输出「旧版(无 VERSION 文件)」或旧版本号（如 2026.10.29.12）→ 更新：第 5 步跳过，完成后告诉用户从哪个版本升到 2026.11.21.1。
 
 【第 3 步：下载、校验、覆盖代码】
 安装目录必须是 ~/workspace/voice-ime（引擎日志路径在编译时写死在这个位置，装到别处只是丢掉引擎日志，功能不受影响）。
     mkdir -p ~/workspace && cd ~/workspace
-    curl -sL -o /tmp/voice-ime.zip 'https://ida.zte.com.cn/zte-paas-lcap-demobff/zte-paas-lcap-demoapi/v1/app/file/uncheck/encryptDownload?fileKey=383a5bdb-15ff-4fc9-ae78-e10dfcb31c99&fileName=voice-ime-2026.10.29.12.zip&encryptEnable=false&securityLevel=null'
+    curl -sL -o /tmp/voice-ime.zip 'https://ida.zte.com.cn/zte-paas-lcap-demobff/zte-paas-lcap-demoapi/v1/app/file/uncheck/encryptDownload?fileKey=d1d3a84c-271c-4618-bb78-10ca30e7f7f2&fileName=voice-ime-2026.11.21.1.zip&encryptEnable=false&securityLevel=null'
     md5sum /tmp/voice-ime.zip
-MD5 必须是 c0ad4685ef41350f1c79a131099ff052，不一致就重新下载。
+MD5 必须是 905be015eb338ae4a632d6a1551262f8，不一致就重新下载。
     [ -f ~/workspace/voice-ime/config.json ] && cp -a ~/workspace/voice-ime/config.json ~/workspace/config.json.bak.$(date +%Y%m%d%H%M)
     unzip -q -o /tmp/voice-ime.zip -d ~/workspace
     cd ~/workspace/voice-ime && chmod +x install.sh service.sh *.py && cat VERSION
@@ -107,7 +107,7 @@ MD5 必须是 c0ad4685ef41350f1c79a131099ff052，不一致就重新下载。
 
 【第 8 步：回报】
 - 全新安装报：安装目录、VERSION、两个服务是否 active、配置台地址、密钥写入长度、用户实测是否成功上屏。
-- 更新报：从哪个版本升到 2026.10.29.12、服务是否全部 active 且刚重启、有没有残留报错、用户实测是否成功上屏。
+- 更新报：从哪个版本升到 2026.11.21.1、服务是否全部 active 且刚重启、有没有残留报错、用户实测是否成功上屏。
 ```
 
 ## 火山引擎 API Key 申请
@@ -146,11 +146,12 @@ API Key 在**豆包语音**控制台申请，不在方舟控制台。
 | 橙色声波 | 即停模式（默认）：松开立即上屏，一句话一句 |
 | 声波加黄描边 | 润色中，通常 1 到 2 秒 |
 | 只有一条细线 | 麦克风没有输入，检查音频设备或远程桌面麦克风重定向 |
-| 红边卡片红字 | 语音密钥无效，去配置台点「校验 Key」 |
+| 红边卡片红字 | 语音密钥无效或识别失败，去配置台检查 Key / 引擎（改 Key 后保存会自动校验） |
 
 ## 其余功能
 
-- **自动润色**（可选）：接一个 OpenAI 兼容的大模型，把口头语、语病、自我纠正整理成书面语再上屏；失败或超过 8 秒就提交识别原文。默认关闭。
+- **识别引擎**（配置台顶部）：豆包流式（默认，边说边出字）或 DeepSeek 非流式（松手后整段上传识别，无中间预览；单次说话按 60 秒自动切段）。
+- **自动润色**（可选）：接一个 OpenAI 兼容的大模型，把口头语、语病、自我纠正整理成书面语再上屏；失败或超过 8 秒就提交识别原文。默认关闭。端点支持 https；本机回环可用 http（本地代理）。
 - **热词**：填一份专有名词表，识别时纠音、润色时纠写法，说 `Coclaw` 不再出 `call log`。
 - **草稿窗**：录一整段只进窗口不打扰光标，可改错字、可让模型优化，再复制出去。
-- **配置台**：浏览器打开 `http://127.0.0.1:19530`，参数、日志、输入历史都在这里。改 API Key 要先点「校验 Key」，通过才能保存。
+- **配置台**：浏览器打开 `http://127.0.0.1:19530`，参数、日志、输入历史都在这里。改 Key 后直接保存，服务端会对本次改动的那一项真连校验；润色模型可点「测试连接」即时验证。

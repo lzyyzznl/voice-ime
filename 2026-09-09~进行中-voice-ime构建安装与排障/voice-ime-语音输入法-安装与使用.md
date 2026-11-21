@@ -18,11 +18,11 @@ domain: 开发经验积累
 
 麻烦的是手上这些 Linux 云桌面：豆包输入法装不上，也没有等价的替代品，而等厂商支持不知道要等到什么时候。那就自己把缺的这一截补上。
 
-而它底下的语音能力来自火山引擎（豆包 SeedASR 流式语音识别），这套 API 对外是开放的。所以缺的其实不是识别引擎，只是把「按住说话」接到 Linux 桌面输入框上的这一段——这个项目做的正是这一段。
+而语音识别这块不缺可用的 API：默认接火山引擎的豆包 SeedASR（流式，边说边出字），也可以换成 DeepSeek 新出的非流式语音识别——后者只要一个 API Key，不用去控制台开通任何服务。缺的其实不是识别引擎，只是把「按住说话」接到 Linux 桌面输入框上的这一段——这个项目做的正是这一段。
 
 ## 这是个什么
 
-Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光标处。不占输入法位——原来的搜狗照常可用，说完一句接着用拼音改字，都在同一个输入框里完成。
+Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光标处。不占输入法位——原来的搜狗照常可用，说完一句接着用拼音改字，都在同一个输入框里完成。识别引擎两选一，配置台顶部随时切换：**豆包流式**（默认，边说边出字）或 **DeepSeek 非流式**（松手后整段识别，配置最简单）。
 
 下面这段是实录：先填热词、看输入历史，再到 iCenter 里聊天说话。
 
@@ -32,11 +32,11 @@ Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光�
 
 把下面这段引导词整段交给 agent，它负责下载、检查依赖、安装、写密钥、验证。全新安装和升级共用同一段，它会自己判断该走哪条路。
 
-只需要准备一样东西：火山引擎的语音识别 API Key，申请方法见下一节，新账号的免费额度足够日常使用。
+只需要准备一个语音识别 API Key，二选一：**DeepSeek**（注册即用，最省事，只要 key）或 **火山引擎豆包**（要先去控制台开通「流式语音识别 2.0」并创建 Key）。申请方法见下一节，两个新账号的免费额度都够日常使用。
 
 ```text
 【任务】
-在这台 Linux 机器上安装或更新 voice-ime 语音输入法：fcitx4 插件 + 语音识别（豆包流式，默认；可在配置台切换为 DeepSeek 非流式），说话即出字，不占用输入法位（拼音照常可用）。这一段步骤全新安装和升级通用——第 2 步先判断是哪种，其余步骤一样跑。安装包里的引擎已经编译好，不需要 gcc、make 或 fcitx-devel。请一步一步执行，每步做完报告结果；某一步失败就停下来说明现象，不要跳过、不要自己换方案。
+在这台 Linux 机器上安装或更新 voice-ime 语音输入法：fcitx4 插件 + 语音识别（引擎二选一：豆包流式 / DeepSeek 非流式，第 5 步问用户选哪个），说话即出字，不占用输入法位（拼音照常可用）。这一段步骤全新安装和升级通用——第 2 步先判断是哪种，其余步骤一样跑。安装包里的引擎已经编译好，不需要 gcc、make 或 fcitx-devel。请一步一步执行，每步做完报告结果；某一步失败就停下来说明现象，不要跳过、不要自己换方案。
 
 【第 1 步：确认环境】
 这是 Linux + fcitx4 桌面（X11 或 xrdp）。
@@ -48,14 +48,14 @@ Linux 桌面上按住 Ctrl+Alt 说话，松开即出字，文字直接落在光�
     cat ~/workspace/voice-ime/VERSION 2>/dev/null \
       || { [ -d ~/workspace/voice-ime ] && echo "旧版(无 VERSION 文件)" || echo "全新安装"; }
 - 输出「全新安装」→ 第 5 步必须问用户要密钥。
-- 输出「旧版(无 VERSION 文件)」或旧版本号（如 2026.10.29.12）→ 更新：第 5 步跳过，完成后告诉用户从哪个版本升到 2026.11.21.1。
+- 输出「旧版(无 VERSION 文件)」或旧版本号（如 2026.11.21.1）→ 更新：第 5 步跳过，完成后告诉用户从哪个版本升到 2026.11.21.2。
 
-【第 3 步：下载、校验、覆盖代码】
+【第 3 步：下载、校验、覆盖代码】（安装包内这份文档的下载链接与 MD5 可能滞后一版；以聊天里给的引导词为准）
 安装目录必须是 ~/workspace/voice-ime（引擎日志路径在编译时写死在这个位置，装到别处只是丢掉引擎日志，功能不受影响）。
     mkdir -p ~/workspace && cd ~/workspace
-    curl -sL -o /tmp/voice-ime.zip 'https://ida.zte.com.cn/zte-paas-lcap-demobff/zte-paas-lcap-demoapi/v1/app/file/uncheck/encryptDownload?fileKey=d1d3a84c-271c-4618-bb78-10ca30e7f7f2&fileName=voice-ime-2026.11.21.1.zip&encryptEnable=false&securityLevel=null'
+    curl -sL -o /tmp/voice-ime.zip 'https://ida.zte.com.cn/zte-paas-lcap-demobff/zte-paas-lcap-demoapi/v1/app/file/uncheck/encryptDownload?fileKey=0ae7edee-e94e-456a-83ad-95f2fa8f8b0a&fileName=voice-ime-2026.11.21.2.zip&encryptEnable=false&securityLevel=null'
     md5sum /tmp/voice-ime.zip
-MD5 必须是 905be015eb338ae4a632d6a1551262f8，不一致就重新下载。
+MD5 必须是 8eb444a8451c6c97f790653b6c45aa8f，不一致就重新下载。
     [ -f ~/workspace/voice-ime/config.json ] && cp -a ~/workspace/voice-ime/config.json ~/workspace/config.json.bak.$(date +%Y%m%d%H%M)
     unzip -q -o /tmp/voice-ime.zip -d ~/workspace
     cd ~/workspace/voice-ime && chmod +x install.sh service.sh *.py && cat VERSION
@@ -69,26 +69,38 @@ MD5 必须是 905be015eb338ae4a632d6a1551262f8，不一致就重新下载。
 - 录音浮窗与草稿窗需要 /usr/bin/python3.6 + GTK3（python3-gobject）。缺了不影响语音输入，install.sh 会自动少装两个服务。
 - 后面要 sudo install，需要 sudo 免密；sudo -n true 失败就先让用户执行一次 sudo -v。
 
-【第 5 步：密钥（仅全新安装或 key 为空时才做）】
+【第 5 步：选引擎 + 密钥（engine 或对应 Key 为空时才做）】
 先看现状：
     cd ~/workspace/voice-ime
     if [ -f config.json ]; then
-        python3 -c "import json;print('key 长度', len(json.load(open('config.json'))['doubao'].get('api_key','')))"
+        python3 -c "import json;d=json.load(open('config.json'));a=d.get('asr') or {};e=a.get('engine') or 'doubao';k=(a.get('api_key') if e=='deepseek' else d['doubao'].get('api_key')) or '';print('engine',e,'key 长度',len(k))"
     else
-        cp config.example.json config.json && echo "新配置已生成，需要填 KEY"
+        cp config.example.json config.json && echo "新配置已生成，engine=doubao，需要填 KEY"
     fi
-- 已有 config.json 且 key 长度大于 0：跳过本步，不要问用户要密钥。
-- 没有 config.json 或 key 为空：向用户索要火山引擎语音识别 API Key（豆包语音控制台 → API Key 管理，形如一串 UUID），再执行：
+- 输出的 key 长度大于 0：跳过本步，不要问用户要密钥。
+- key 为空：**问用户选哪个识别引擎**（只问这一个问题）：
+  · DeepSeek（推荐）：platform.deepseek.com 创建 API Key，形如 sk-xxxxxxxx，不需要开通任何服务。
+  · 豆包 SeedASR（流式）：需先在火山引擎语音技术控制台开通「流式语音识别 2.0」再创建 API Key（一串 UUID），步骤见说明书「识别引擎与密钥」。
+  用户没有偏好时用 DeepSeek。
+- 按选择写入（KEY 换成真实值，不要回显完整密钥）：
     python3 - <<'PY'
     import json, pathlib
+    engine = "deepseek"          # 选豆包改为 "doubao"
+    key = "把用户的 KEY 填在这里"
     p = pathlib.Path("config.json")
     d = json.loads(p.read_text(encoding="utf-8"))
-    d["doubao"]["api_key"] = "把用户的 KEY 填在这里"
+    a = d.setdefault("asr", {})
+    a["engine"] = engine
+    if engine == "deepseek":
+        a["api_key"] = key
+    else:
+        d.setdefault("doubao", {})["api_key"] = key
+        a["api_key"] = ""
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("已写入，长度", len(d["doubao"]["api_key"]))
+    print("已写入 engine", engine, "长度", len(key))
     PY
-不要回显完整密钥，只回报「已写入，长度 N」。LLM 润色默认关闭，不需要配。
-- 更新时补字段：对照 config.json 与 config.example.json，把新版多出来的顶层键补进去，已有值一律保留。
+- 只回报「已写入 engine=X，长度 N」。LLM 润色默认关闭，不需要配。
+- 更新时补字段：对照 config.json 与 config.example.json，把新版多出来的顶层键补进去（含 asr.engine / asr.api_key / asr.endpoint），已有值一律保留。
 
 【第 6 步：安装/升级并启动】
     cd ~/workspace/voice-ime && VOICEIME_YUM_NO_PROXY="nsdlmirrors.zte.com.cn,.zte.com.cn" ./install.sh
@@ -107,10 +119,26 @@ MD5 必须是 905be015eb338ae4a632d6a1551262f8，不一致就重新下载。
 
 【第 8 步：回报】
 - 全新安装报：安装目录、VERSION、两个服务是否 active、配置台地址、密钥写入长度、用户实测是否成功上屏。
-- 更新报：从哪个版本升到 2026.11.21.1、服务是否全部 active 且刚重启、有没有残留报错、用户实测是否成功上屏。
+- 更新报：从哪个版本升到 2026.11.21.2、服务是否全部 active 且刚重启、有没有残留报错、用户实测是否成功上屏。
 ```
 
-## 火山引擎 API Key 申请
+## 识别引擎与密钥
+
+识别引擎二选一，配置台顶部随时切换；切换后填对应 Key、点「校验 Key」、保存即可。
+
+### DeepSeek（推荐，配置最简单）
+
+只要一个 Key，不用去控制台开通任何服务。按音频时长计费：0.78 元/小时（限时 5 折 0.39 元/小时）。
+
+1. 打开 [DeepSeek 开放平台](https://platform.deepseek.com)，注册并登录。
+2. 左侧「API Keys」→「创建 API Key」，复制 `sk-` 开头的密钥（只完整显示一次）。
+3. 配置台顶部「识别引擎」选 **DeepSeek**，粘贴 Key →「校验 Key」→ 保存。
+
+代价：非流式，松手后整段上传识别，没有边说边出的预览；单次说话超过 60 秒会自动切段续录。
+
+### 火山引擎豆包 SeedASR（流式，边说边出字）
+
+要先去控制台开通服务再创建 Key，步骤比 DeepSeek 多：
 
 <details>
 <summary>展开：三步拿到 Key（新账号 20 小时免费额度）</summary>
@@ -120,6 +148,7 @@ API Key 在**豆包语音**控制台申请，不在方舟控制台。
 1. **进入控制台**：打开[语音技术控制台](https://console.volcengine.com/speech/new/overview?ResourceID=volc.service_type.10074&projectName=default)，登录并完成实名认证。
 2. **开通服务**：左侧「开通管理」→「流式语音识别 2.0」→ 点「开通」。开通后卡片上直接显示剩余时长。
 3. **创建 API Key**：左侧「API Key」→「创建 API Key」，名字随意（比如 voice-ime）；建好后点行尾的眼睛图标显示完整密钥，复制那一串 UUID。
+4. **配置台**：顶部「识别引擎」选 **豆包 SeedASR**，粘贴 UUID →「校验 Key」→ 保存。
 
 ![[火山语音控制台-开通服务.png|720]]
 
@@ -150,7 +179,7 @@ API Key 在**豆包语音**控制台申请，不在方舟控制台。
 
 ## 其余功能
 
-- **识别引擎**（配置台顶部）：豆包流式（默认，边说边出字）或 DeepSeek 非流式（松手后整段上传识别，无中间预览；单次说话按 60 秒自动切段）。
+- **识别引擎**（配置台顶部，随时切换）：豆包流式（默认，边说边出字，需先在火山控制台开通服务）或 DeepSeek 非流式（松手后整段上传识别，无中间预览，只要一个 Key；单次说话按 60 秒自动切段）。
 - **自动润色**（可选）：接一个 OpenAI 兼容的大模型，把口头语、语病、自我纠正整理成书面语再上屏；失败或超过 8 秒就提交识别原文。默认关闭。端点支持 https；本机回环可用 http（本地代理）。
 - **热词**：填一份专有名词表，识别时纠音、润色时纠写法，说 `Coclaw` 不再出 `call log`。
 - **草稿窗**：录一整段只进窗口不打扰光标，可改错字、可让模型优化，再复制出去。

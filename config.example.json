@@ -1,4 +1,9 @@
 {
+  "asr": {
+    "engine": "doubao",
+    "api_key": "",
+    "endpoint": ""
+  },
   "doubao": {
     "api_key": "YOUR_DOUBAO_API_KEY",
     "resource_id": "volc.seedasr.sauc.duration",

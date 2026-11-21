@@ -2,7 +2,7 @@
 
 > **安装与使用：见 [INSTALL.md](INSTALL.md)**（面向 AI 代理的分步指南）
 
-在 Linux 桌面（X11 + fcitx 4）上，用**豆包流式语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。
+在 Linux 桌面（X11 + fcitx 4）上，用**语音识别（ASR）**把说话内容直接输入到当前应用，**可选 LLM 自动润色**后再上屏。识别引擎二选一：**豆包流式**（边说边出字，默认）或 **DeepSeek 非流式**（松手后整段音频上传，一次返回结果）。
 **默认对讲机模式：按住 Ctrl+Alt 说话，松开即停并上屏**；未聚焦输入框时使用同一快捷键，完整识别结束后文本会写入系统剪贴板，并在浮窗提示“已复制到剪贴板”。
 
 > 快捷键可改：**按住说话** 与 **按住持续对话** 两组组合在配置台「快捷键」卡片里设置（`ptt_keys` / `hold_keys`）。
@@ -16,8 +16,8 @@
 flowchart LR
     E[fcitx 插件 voiceime.c<br/>fcitx4 Module addon<br/>按键过滤器 + 无输入框按键轮询] -->|"Unix socket /tmp/voiceime-service.sock<br/>JSON 行: start/stop/cancel/mode"| S[core: voice_ime_service.py]
     S -->|"parec 16kHz PCM<br/>200ms 音频帧 · 独立发送线程（不阻塞录音）"| R[Recorder]
-    R -->|"音频路由"| A[ASR: asr_doubao.py<br/>豆包 async 双向流式]
-    A -->|"interim / definite final"| S
+    R -->|"音频路由"| A[ASR 引擎二选一<br/>asr_doubao.py 豆包 async 双向流式<br/>asr_deepseek.py DeepSeek 整段上传]
+    A -->|"豆包: interim / definite final<br/>DeepSeek: 松手后 final"| S
     S -->|"auto_polish 开启时"| L[润色: llm_polish.py<br/>OpenAI 兼容端点（DeepSeek 等）<br/>JSON Output · 多模型可切换]
     L --> S
     S -->|"preedit / commit / done / started"| E
@@ -48,6 +48,7 @@ voice-ime/
 ├── icons/                   # 图标（gen_icons.py + SVG）
 ├── voice_ime_service.py     # core：Unix socket 服务、录音、ASR 调度、润色队列
 ├── asr_doubao.py            # 豆包流式 ASR 客户端（bigmodel_async 逐句定稿）
+├── asr_deepseek.py          # DeepSeek 非流式 ASR 客户端（松手后整段 WAV 上传）
 ├── llm_polish.py            # LLM 润色共享模块（core 自动润色 + 草稿窗优化）
 ├── voiceime_osd.py          # 录音浮窗（GTK3，系统 python3.6）
 ├── voiceime_draft.py        # 草稿窗（GTK3，python3.6）
@@ -101,13 +102,16 @@ voice-ime/
 - **Esc** 关窗并退出草稿模式
 
 **Web 配置台**：浏览器开 `http://127.0.0.1:19530`。
-- **配置** tab：改 ASR/润色参数、管理多个 LLM 模型（下拉切换、增删、持久化保存）、看实时日志、一键重启。
+- **配置** tab：选识别引擎（豆包流式 / DeepSeek 非流式）、改 ASR/润色参数、管理多个 LLM 模型（下拉切换、增删、持久化保存）、看实时日志、一键重启。
 - **输入历史** tab：每句上屏即记录（`logs/voiceime-history.jsonl`），表格同时展示**识别原文**与**润色后上屏文本**、润色耗时/失败状态；搜索框对两者做模糊匹配（空格分词，全部命中，命中片段高亮），可切换 50/100/300 条与自动刷新。
 
 ## 配置（config.json）
 
 | 键 | 说明 |
 |---|---|
+| `asr.engine` | 识别引擎：`doubao`（默认，流式边说边出字）或 `deepseek`（非流式，松手后整段上传，无中间预览；单次说话按 60s 自动切段续录） |
+| `asr.api_key` | DeepSeek 语音 API Key（引擎为 deepseek 时必填） |
+| `asr.endpoint` | DeepSeek ASR 端点，留空用 `https://api.deepseek.com/v1/tools/asr`（可改填内网网关） |
 | `doubao.api_key` | 豆包火山引擎 API Key |
 | `doubao.resource_id` | 固定 `volc.seedasr.sauc.duration`（2.0 时长版：按音频时长扣额度、不占并发名额），一般不用改 |
 | `doubao.hotwords` | **热词**（字符串数组）：一份词表、两条链路 —— 识别时直传豆包 ASR，润色时注入提示词。配置台以标签输入（回车/逗号添加、× 删除、可整段粘贴）。机制与边界见「[热词（专有名词补充机制）](#热词专有名词补充机制)」 |
@@ -250,3 +254,7 @@ fcitx-remote                        # 输入法状态（输入框上屏需激活
 ```
 
 切换 `llm.active`（配置台下拉或手改）即换模型，**连接按模型复用**（TLS 握手只一次）。
+
+端点协议：`https` 任意主机；`http` 只允许本机回环（`127.0.0.1` / `localhost`，用于本地代理、llama.cpp、one-api 等；明文不发给外部网络）。
+
+校验：配置台点「测试连接」即时验证；保存时服务端会对你**本次改动过**的模型（endpoint / api_key / model 任一变化，或新增模型）真发一次最小 chat 请求，失败则拒绝保存并说明原因。未改动的模型不联网。

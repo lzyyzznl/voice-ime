@@ -14,6 +14,7 @@ api_key 字段：以 sk- 开头视为真实密钥直接使用；否则视为环�
 （JSON 模式 API 偶发返回空 content → 抛异常，调用方降级为原文。）
 """
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -88,14 +89,32 @@ def _ssl_ctx():
     return _ctx
 
 
+def _is_loopback(host):
+    """本机回环判定：127.0.0.0/8、::1、localhost。"""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return (host or "").strip().lower().rstrip(".") in ("localhost", "localhost.localdomain")
+
+
 def _post(endpoint, body_bytes, timeout, auth=None):
-    """HTTP POST（JSON），TLS 连接按 (线程, endpoint) 复用；失效自动重连一次。
+    """HTTP POST（JSON），连接按 (线程, endpoint) 复用；失效自动重连一次。
 
     返回响应体 bytes。相比每次新建连接省去每句一次的 TLS 握手（~200ms）。
     """
     u = urllib.parse.urlsplit(endpoint)
-    if u.scheme != "https":
-        raise RuntimeError("endpoint 仅支持 https: %s" % endpoint)
+    if u.scheme == "https":
+        def make_conn():
+            return http.client.HTTPSConnection(u.hostname, u.port or 443,
+                                               timeout=timeout, context=_ssl_ctx())
+    elif u.scheme == "http" and _is_loopback(u.hostname):
+        # 明文只放行本机回环（本地代理 / llama.cpp / one-api，常见 http://127.0.0.1:8790）。
+        # 非回环 http 会把 API Key 明文发到网络上，一律拒绝。
+        def make_conn():
+            return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+    else:
+        raise RuntimeError("endpoint 仅支持 https；http 只允许本机回环（127.0.0.1/localhost）: %s"
+                           % endpoint)
     cache = getattr(_tls, "conns", None)
     if cache is None:
         cache = _tls.conns = {}
@@ -106,9 +125,7 @@ def _post(endpoint, body_bytes, timeout, auth=None):
     for attempt in (0, 1):   # 首试 + 断连重建一次
         try:
             if conn is None:
-                conn = http.client.HTTPSConnection(u.hostname, u.port or 443,
-                                                   timeout=timeout,
-                                                   context=_ssl_ctx())
+                conn = make_conn()
             conn.request("POST", u.path or "/", body=body_bytes, headers=headers)
             resp = conn.getresponse()
             data = resp.read()

@@ -30,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asr_doubao import DoubaoASR, URL_ASYNC
+from asr_deepseek import DeepSeekASR, URL as DS_URL
 import llm_polish
 
 SOCKET_PATH = "/tmp/voiceime-service.sock"
@@ -419,13 +420,20 @@ class VoiceIMEService:
         except Exception:
             pass
 
-    def _current_api_key(self):
-        """当前生效的 API Key（每次现读 config，与 _make_asr 同源）"""
+    def _read_cfg(self):
+        """现读 config.json（引擎 / Key / 参数热更新）；读失败沿用启动时配置"""
         try:
-            d = json.loads(Path(self.config_path).read_text(encoding="utf-8")).get("doubao") or {}
+            return json.loads(Path(self.config_path).read_text(encoding="utf-8"))
         except Exception:
-            d = self.cfg.get("doubao") or {}
-        return (d.get("api_key") or "").strip()
+            return self.cfg
+
+    def _current_api_key(self):
+        """当前生效的 ASR API Key（与 _make_asr 同源）"""
+        cfg = self._read_cfg()
+        a = cfg.get("asr") or {}
+        if (a.get("engine") or "doubao") == "deepseek":
+            return (a.get("api_key") or "").strip()
+        return ((cfg.get("doubao") or {}).get("api_key") or "").strip()
 
     def _draft_send(self, obj):
         """向草稿窗口发识别文本/显示命令，失败忽略（草稿窗口未启动等）"""
@@ -532,15 +540,19 @@ class VoiceIMEService:
             self.attaching = False      # ASR 握手线程在跑：stop 需等它挂上再收尾（慢握手时靠缓存补发）
 
     def _make_asr(self, session):
-        """构造 ASR 客户端（豆包 bigmodel_async），回调接口：interim / final"""
+        """构造 ASR 客户端：asr.engine 选 doubao（流式）/ deepseek（非流式整段上传）"""
         def _cbs():
             return (lambda p: self.on_interim(session, p),
                     lambda p: self.on_final(session, p))
-        d = self.cfg.get("doubao") or {}
-        try:   # 热词 / API Key / 识别参数热更新：配置台保存后，下一句录音就用新值
-            d = json.loads(Path(self.config_path).read_text(encoding="utf-8")).get("doubao") or d
-        except Exception as e:
-            log.warning("重读 config.json 的 doubao 段失败，沿用启动时配置: %s", e)
+        cfg = self._read_cfg()   # 热更新：配置台保存后，下一句录音就用新值
+        a = cfg.get("asr") or {}
+        if (a.get("engine") or "doubao") == "deepseek":
+            return DeepSeekASR(
+                api_key=a.get("api_key", ""),
+                endpoint=a.get("endpoint") or DS_URL,
+                sample_rate=cfg.get("sample_rate", 16000),
+            ).start(*_cbs())
+        d = cfg.get("doubao") or {}
         if d.get("hotwords"):
             log.info("热词 %d 个: %s", len(d["hotwords"]), ", ".join(map(str, d["hotwords"][:10])))
         # 优化双向流式端点（bigmodel_async）：实测逐句 definite 正常，
@@ -551,7 +563,7 @@ class VoiceIMEService:
             resource_id=d.get("resource_id", "volc.seedasr.sauc.duration"),
             request=d.get("request"),
             hotwords=d.get("hotwords"),
-            sample_rate=self.cfg.get("sample_rate", 16000),
+            sample_rate=cfg.get("sample_rate", 16000),
             url=URL_ASYNC,
         ).start(*_cbs())
 
@@ -914,10 +926,13 @@ class VoiceIMEService:
     def _rotate_sec(self):
         """单次 ASR 会话的兜底上限（正常一次说话远到不了）。
 
-        豆包 async 端点长音频实测无截断：30s 单会话完整识别、逐句 definite
-        定稿。旧的"只认前 15 秒"结论来自 espeak 噪声音频的误测，已推翻。
-        保留 300s 只为防连接老化，不再按 12s 切段（切段会让长句被拆成
-        多段上屏 + 分段润色）。"""
+        deepseek 非流式：单请求 ≤120s，按 60s 切段续录。切段时旧会话要上传
+        完（约 1.9MB）才轮到新会话，期间音频进 8s 缓存（BUF_MAX）— 留足余量。
+        豆包 async 端点长音频实测无截断：保留 300s 仅防连接老化，不按 12s 切段
+        （切段会让长句被拆成多段上屏 + 分段润色）。"""
+        cfg = self._read_cfg()
+        if ((cfg.get("asr") or {}).get("engine") or "doubao") == "deepseek":
+            return 60
         return 300
 
     def switch_session(self, session, gen):
@@ -1070,6 +1085,9 @@ class VoiceIMEService:
         finals = asr.stop(timeout=5) if asr else []
         if asr is not None and getattr(asr, "_error", None):
             log.warning("ASR 错误（服务端返回）: %s", asr._error)
+            if getattr(asr, "is_nonstream", False):
+                # 非流式是松手后一次性请求：失败时没有任何文本，必须让用户看见
+                self._osd_send({"type": "error", "text": str(asr._error)})
         # asr.stop() 阻塞期间 recv 线程仍可能处理迟到 final 并调 on_final；此时
         # stopping=True 已挡掉即时提交。但 committed 必须读 asr.stop 返回后的最新值：
         # 若在 stop 前读（旧值），on_final 已提交的句会被 remaining 再次覆盖 → 重复

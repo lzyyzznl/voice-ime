@@ -36,7 +36,7 @@ ALLOWED = {
     "silence_rms_threshold": int, "focus_lost_stop": bool, "hold_ms": int,
     "ptt_keys": str, "hold_keys": str,
 }
-SUBOBJECTS = {"osd", "llm", "doubao"}   # dict 子对象整体校验类型
+SUBOBJECTS = {"osd", "llm", "doubao", "asr"}   # dict 子对象整体校验类型
 
 MODS = ("ctrl", "alt", "shift")
 COMBO_KEYS = {"space", "tab", "esc", "escape", "`"}
@@ -116,6 +116,14 @@ def sanitize(patch):
                     d["request"] = {kk: vv for kk, vv in v["request"].items()
                                     if isinstance(vv, (bool, int, str))}
                 clean[k] = d
+            elif k == "asr":
+                d = {}
+                if v.get("engine") in ("doubao", "deepseek"):
+                    d["engine"] = v["engine"]
+                for kk in ("api_key", "endpoint"):
+                    if isinstance(v.get(kk), str):
+                        d[kk] = v[kk].strip()
+                clean[k] = d
             elif k == "llm":
                 model_keys = ("id", "name", "endpoint", "api_key", "model", "system_prompt", "prompt")
                 d = {"active": v.get("active")} if isinstance(v.get("active"), str) else {}
@@ -187,6 +195,97 @@ def verify_doubao(d):
                 asr.close()
             except Exception:
                 pass
+
+
+def verify_deepseek(d):
+    """真发一次 0.5s 静音 WAV 到 /v1/tools/asr：200 即 Key 可用（401/403 是 Key 问题）。
+    不依赖识别出字：静音返回空 text 也算通过。"""
+    import asr_deepseek
+    key = (d.get("api_key") or "").strip()
+    if not key:
+        return False, "API Key 为空"
+    cli = None
+    try:
+        cli = asr_deepseek.DeepSeekASR(api_key=key,
+                                       endpoint=d.get("endpoint") or asr_deepseek.URL)
+        cli.send_audio(b"\x00\x00" * 8000)   # 0.5s 16kHz 静音
+        cli.stop()
+        if cli._error:
+            return False, cli._error
+        return True, "Key 可用"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if cli is not None:
+            cli.close()
+
+
+def verify_changed_keys(cur, patch):
+    """保存前只对**本次改动过**的 ASR Key 真连一次。
+    没改的 Key 不联网：改 LLM 模型、快捷键、识别参数都不会被 Key 校验挡住。
+    清空 Key 允许保存（可能暂时不用该引擎）。返回 (ok, msg)。"""
+    for sec, name, verifier in (("asr", "DeepSeek", verify_deepseek),
+                                ("doubao", "豆包", verify_doubao)):
+        p = patch.get(sec) or {}
+        if "api_key" not in p:
+            continue
+        new = (p.get("api_key") or "").strip()
+        old = ((cur.get(sec) or {}).get("api_key") or "").strip()
+        if not new or new == old:
+            continue
+        ok, msg = verifier({**(cur.get(sec) or {}), **p, "api_key": new})
+        if not ok:
+            return False, "%s 语音 Key 校验失败：%s" % (name, msg)
+    return True, ""
+
+
+def verify_llm(m):
+    """真发一次最小 chat 请求：端点 / Key / 模型名任一错都会失败。"""
+    import llm_polish
+    m = dict(m or {})
+    endpoint = (m.get("endpoint") or "").strip()
+    model = (m.get("model") or "").strip()
+    if not endpoint:
+        return False, "Endpoint 为空"
+    if not model:
+        return False, "模型为空"
+    body = json.dumps({"model": model,
+                       "messages": [{"role": "user", "content": "ping"}],
+                       "max_tokens": 8}).encode("utf-8")
+    try:
+        llm_polish._post(endpoint, body, timeout=15, auth=llm_polish.resolve_key(m))
+        return True, "连接正常"
+    except Exception as e:
+        msg = str(e)
+        low = msg.lower()
+        if "401" in msg or "unauthor" in low:
+            msg = "Key 无效（服务端 401）"
+        elif "403" in msg:
+            msg = "Key 无权限（服务端 403）"
+        elif "timeout" in low or "timed out" in low:
+            msg = "连接超时，检查网络或代理"
+        return False, msg
+
+
+def verify_changed_llm(cur, patch):
+    """保存前校验**本次改动过**的润色模型（新增也算）；没改的模型不联网。"""
+    p = patch.get("llm") or {}
+    models = p.get("models")
+    if not isinstance(models, list):
+        return True, ""
+    old = {m.get("id"): m for m in ((cur.get("llm") or {}).get("models") or [])
+           if isinstance(m, dict) and m.get("id")}
+    for m in models:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        o = old.get(m["id"])
+        if o and all((m.get(k) or "") == (o.get(k) or "")
+                     for k in ("endpoint", "api_key", "model")):
+            continue
+        ok, msg = verify_llm({**o, **m} if o else m)
+        if not ok:
+            return False, "润色模型「%s」校验失败：%s" % (m.get("name") or m["id"], msg)
+    return True, ""
 
 
 def service_status():
@@ -423,7 +522,7 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
     <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#f2efe8" stroke-width="1.8" stroke-linecap="square"><rect x="7" y="3" width="10" height="15" rx="0"/><path d="M4 11v1a8 8 0 0 0 16 0v-1M12 20v1.6"/></svg></div>
     <div class="h-t">
       <h1>voice-ime 配置台</h1>
-      <div class="sub">fcitx4 语音输入 · 豆包流式识别 · 配置保存即写 config.json</div>
+      <div class="sub">fcitx4 语音输入 · 豆包 / DeepSeek 识别 · 配置保存即写 config.json</div>
     </div>
     <div class="badges" id="badges">
       <span class="badge"><span class="dot" id="bdgSvc"></span>服务 <b id="bdgPid">…</b></span>
@@ -437,6 +536,30 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
   </nav>
 
   <div class="pane" id="pane-cfg">
+
+  <section class="card" id="engineCard">
+    <div class="card-h"><h2>识别引擎</h2><span class="hint">保存后下一句录音生效</span></div>
+    <div class="grid" style="grid-template-columns:1fr">
+      <div class="f"><label for="asr_engine">引擎</label>
+        <select id="asr_engine">
+          <option value="doubao">豆包 SeedASR（流式，边说边出字）</option>
+          <option value="deepseek">DeepSeek ASR（非流式，松手后整段识别）</option>
+        </select>
+        <p class="fa">豆包：实时预览、停顿即定稿逐句上屏。DeepSeek：整段音频在松手后一次上传，没有中间预览；单请求上限 120 秒，更长说话按 100 秒自动切段续录。</p></div>
+    </div>
+    <p class="card-desc" style="margin:16px 0 10px">DeepSeek 语音识别<span style="color:var(--faint)"> · 仅在引擎选 DeepSeek 时使用</span></p>
+    <div class="grid" style="grid-template-columns:1fr">
+      <div class="f"><label for="asr_api_key">API Key</label>
+        <div class="pw"><input type="password" id="asr_api_key" autocomplete="off" spellcheck="false"><button class="eye" id="eyeDsKey" type="button">显示</button></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button class="btn" id="btnVerifyDs" type="button">校验 Key</button>
+          <span class="hint" id="dsState">未校验</span>
+        </div></div>
+      <div class="f in-mono"><label for="asr_endpoint">识别端点</label>
+        <input type="text" id="asr_endpoint" spellcheck="false" placeholder="https://api.deepseek.com/v1/tools/asr">
+        <p class="fa">留空用官方端点。换内网网关时填完整 URL（POST multipart，file 字段为 16bit PCM WAV）。</p></div>
+    </div>
+  </section>
 
   <section class="card" id="doubaoCard">
     <div class="card-h"><h2>豆包 SeedASR</h2><span class="hint" id="doubaoState">识别请求参数</span></div>
@@ -518,6 +641,10 @@ table.hist mark{background:var(--amber);color:var(--paper);padding:0 2px}
       <div class="f"><label for="llm_api_key">API Key</label><input type="text" id="llm_api_key" spellcheck="false"></div>
     </div>
     <div class="f" style="margin-top:10px"><label for="llm_name">模型名称</label><input type="text" id="llm_name" spellcheck="false" placeholder="下拉里显示的名字"></div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+      <button class="btn" id="btnVerifyLlm" type="button">测试连接</button>
+      <span class="hint" id="llmState">未校验</span>
+    </div>
     <label class="sw" style="margin-top:14px"><input type="checkbox" id="llm_auto_polish"><span class="tr"></span><span class="n">自动润色</span><span class="d">每句上屏前先润色（对当前选中模型生效）</span></label>
     <div class="f" style="margin-top:14px"><label>System Prompt</label>
       <button type="button" class="prompt-btn" id="btnPromptEdit">
@@ -620,6 +747,9 @@ const FIELD = [
   ["silence_rms_threshold", "silence_rms_threshold", "n", true],
   ["focus_lost_stop", "focus_lost_stop", "b", true],
   ["llm_auto_polish", "llm.auto_polish", "b"],
+  ["asr_engine",   "asr.engine", "s"],
+  ["asr_api_key",  "asr.api_key", "s"],
+  ["asr_endpoint", "asr.endpoint", "s"],
 ];
 const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
   enable_accelerate_text:false, enable_nonstream:true, show_utterances:true,
@@ -627,14 +757,16 @@ const FALLBACK = { enable_punc:true, enable_itn:true, enable_ddc:false,
   ptt_keys:"ctrl+alt", hold_keys:"ctrl+alt+space" };
 
 let verifiedKey = null;      // 校验通过时输入框里的 Key；与输入框不一致就不许保存
-function setKeyState(msg, kind){
-  const el = $("keyState");
+let verifiedDsKey = null;    // 同上，DeepSeek 引擎
+function setState(elId, msg, kind){
+  const el = $(elId);
   if (!el) return;
   el.textContent = msg;
   el.style.color = kind === "ok" ? "var(--green)"
                  : kind === "err" ? "var(--red)"
                  : kind === "warn" ? "var(--amber)" : "";
 }
+const setKeyState = (msg, kind) => setState("keyState", msg, kind);
 
 function fillModels(cfg){
   const llm = cfg && cfg.llm || {};
@@ -664,6 +796,7 @@ function fillModelFields(){
   $("llm_api_key").value = m.api_key || "";
   $("llm_name").value = m.name || "";
   promptPreview();
+  setState("llmState", m.endpoint ? "未测试" : "未配置", m.endpoint ? "" : "warn");
 }
 function saveModelFields(){
   const m = curModel(); if (!m) return;
@@ -722,9 +855,12 @@ function fillForm(cfg){
     else if (type === "l") el.value = Array.isArray(v) ? v.join("\\n") : (v == null ? "" : v);
     else el.value = v == null ? "" : v;      // s：字符串原样回填（漏了这行 Key/快捷键都显示为空）
   }
-  // 页面加载时存着的 Key 视为已校验（它就是当前生效的）；改过之后必须重新校验
+  // 页面加载时已知的 Key 视为可用；保存时服务端会真连一次改动过的那一项
   verifiedKey = String(getPath(cfg, "doubao.api_key") || "").trim();
-  setKeyState(verifiedKey ? "当前保存的 Key（未重新校验）" : "未配置", verifiedKey ? "" : "warn");
+  setKeyState(verifiedKey ? "已配置（保存时自动校验）" : "未配置", verifiedKey ? "" : "warn");
+  verifiedDsKey = String(getPath(cfg, "asr.api_key") || "").trim();
+  setState("dsState", verifiedDsKey ? "已配置（保存时自动校验）" : "未配置",
+           verifiedDsKey ? "" : "warn");
 }
 function collectCfg(){
   const cfg = {};
@@ -853,18 +989,21 @@ async function post(path, body){
 let saving = false;
 async function save(restart){
   if (saving) return;
-  if ($("api_key").value.trim() !== verifiedKey){
-    toast("需要先校验 API Key", "点「校验 Key」，通过后才能保存", "err", 5200);
-    return;
-  }
   saving = true;
   const btn = restart ? $("btnSaveRestart") : $("btnSave");
   const old = btn.textContent; btn.disabled = true; btn.textContent = restart ? "保存并重启中…" : "保存中…";
   try {
     const r = await post("/api/config", { config: collectCfg(), restart });
     if (r.error) toast("保存失败", r.error, "err", 5200);
-    else { toast(restart ? "已保存并重启" : "已保存", r.msg.replace(/^config\.json 已更新\s*\|?\s*/, ""), restart ? "ok" : undefined);
-           if (restart) { toast("重启输出", r.msg, "ok"); setTimeout(loadLog, 800); } }
+    else {
+      // 服务端保存前已真连校验过改动过的 Key；同步状态，别留着"已修改"的提示
+      verifiedKey = $("api_key").value.trim();
+      verifiedDsKey = $("asr_api_key").value.trim();
+      setKeyState(verifiedKey ? "已配置" : "未配置", verifiedKey ? "ok" : "warn");
+      setState("dsState", verifiedDsKey ? "已配置" : "未配置", verifiedDsKey ? "ok" : "warn");
+      toast(restart ? "已保存并重启" : "已保存", r.msg.replace(/^config\.json 已更新\s*\|?\s*/, ""), restart ? "ok" : undefined);
+      if (restart) { toast("重启输出", r.msg, "ok"); setTimeout(loadLog, 800); }
+    }
   } catch(e){ toast("请求失败", String(e), "err"); }
   btn.disabled = false; btn.textContent = old; saving = false;
   refreshState();
@@ -968,11 +1107,15 @@ $("logname").addEventListener("change", loadLog);
 $("logn").addEventListener("change", loadLog);
 
 /* ── 密码显示 ─────────────────────────── */
-$("eyeKey").addEventListener("click", () => {
-  const i = $("api_key"), show = i.type === "password";
-  i.type = show ? "text" : "password";
-  $("eyeKey").textContent = show ? "隐藏" : "显示";
-});
+function bindEye(inputId, btnId){
+  $(btnId).addEventListener("click", () => {
+    const i = $(inputId), show = i.type === "password";
+    i.type = show ? "text" : "password";
+    $(btnId).textContent = show ? "隐藏" : "显示";
+  });
+}
+bindEye("api_key", "eyeKey");
+bindEye("asr_api_key", "eyeDsKey");
 
 /* ── Key 校验：不通过不许保存 ─────────────── */
 $("btnVerify").addEventListener("click", async () => {
@@ -991,7 +1134,41 @@ $("btnVerify").addEventListener("click", async () => {
 });
 $("api_key").addEventListener("input", () => {
   if ($("api_key").value.trim() !== verifiedKey)
-    setKeyState("已修改，保存前需要重新校验", "warn");
+    setKeyState("已修改，保存时会自动校验", "warn");
+});
+
+$("btnVerifyDs").addEventListener("click", async () => {
+  const btn = $("btnVerifyDs"), old = btn.textContent;
+  btn.disabled = true; btn.textContent = "校验中…";
+  setState("dsState", "正在连接 DeepSeek…");
+  try {
+    const r = await post("/api/verify", { engine: "deepseek",
+      asr: { api_key: $("asr_api_key").value.trim(),
+             endpoint: $("asr_endpoint").value.trim() } });
+    if (r.ok) { verifiedDsKey = $("asr_api_key").value.trim(); setState("dsState", r.msg || "Key 可用", "ok"); }
+    else { verifiedDsKey = null; setState("dsState", r.msg || r.error || "校验失败", "err"); }
+  } catch (e) {
+    verifiedDsKey = null; setState("dsState", "请求失败：" + e, "err");
+  }
+  btn.disabled = false; btn.textContent = old;
+});
+$("asr_api_key").addEventListener("input", () => {
+  if ($("asr_api_key").value.trim() !== verifiedDsKey)
+    setState("dsState", "已修改，保存时会自动校验", "warn");
+});
+
+$("btnVerifyLlm").addEventListener("click", async () => {
+  saveModelFields();
+  const btn = $("btnVerifyLlm"), old = btn.textContent;
+  btn.disabled = true; btn.textContent = "测试中…";
+  setState("llmState", "正在请求模型…");
+  try {
+    const r = await post("/api/verify", { engine: "llm", llm: curModel() || {} });
+    setState("llmState", r.msg || (r.ok ? "连接正常" : "校验失败"), r.ok ? "ok" : "err");
+  } catch (e) {
+    setState("llmState", "请求失败：" + e, "err");
+  }
+  btn.disabled = false; btn.textContent = old;
 });
 
 /* ── 快捷键捕获：聚焦后直接按组合键 ────── */
@@ -1110,12 +1287,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/verify":
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-                d = body.get("doubao") or {}
-                if not (d.get("api_key") or "").strip():
-                    self._send(400, json.dumps({"ok": False, "msg": "API Key 为空"},
-                                               ensure_ascii=False))
-                    return
-                ok, msg = verify_doubao(d)
+                eng = body.get("engine") or "doubao"
+                if eng == "deepseek":
+                    d = body.get("asr") or {}
+                    if not (d.get("api_key") or "").strip():
+                        self._send(400, json.dumps({"ok": False, "msg": "API Key 为空"},
+                                                   ensure_ascii=False))
+                        return
+                    ok, msg = verify_deepseek(d)
+                elif eng == "llm":
+                    ok, msg = verify_llm(body.get("llm") or {})
+                else:
+                    d = body.get("doubao") or {}
+                    if not (d.get("api_key") or "").strip():
+                        self._send(400, json.dumps({"ok": False, "msg": "API Key 为空"},
+                                                   ensure_ascii=False))
+                        return
+                    ok, msg = verify_doubao(d)
                 self._send(200 if ok else 400,
                            json.dumps({"ok": ok, "msg": msg}, ensure_ascii=False))
                 return
@@ -1133,6 +1321,12 @@ class Handler(BaseHTTPRequestHandler):
                         self._send(400, json.dumps({"error": "; ".join(errors)}))
                         return
                     cfg = load_cfg()
+                    ok, vmsg = verify_changed_keys(cfg, clean)
+                    if ok:
+                        ok, vmsg = verify_changed_llm(cfg, clean)
+                    if not ok:
+                        self._send(400, json.dumps({"error": vmsg}, ensure_ascii=False))
+                        return
                     deep_merge(cfg, clean)
                     save_cfg(cfg)
                     msg = "config.json 已更新"
